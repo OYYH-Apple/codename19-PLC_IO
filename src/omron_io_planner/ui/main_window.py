@@ -4,8 +4,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -61,6 +61,7 @@ from .data_type_delegate import DataTypeDelegate
 from .dialogs import (
     ChoiceInputDialog,
     IntInputDialog,
+    LoadingPopup,
     MessageDialog,
     PreferencesDialog,
     TextInputDialog,
@@ -110,10 +111,24 @@ def _make_action_btn(
     return btn
 
 
+def _make_immersive_btn(
+    text: str,
+    *,
+    tooltip: str = "",
+    danger: bool = False,
+    icon_name: str = "",
+) -> QPushButton:
+    btn = _make_action_btn(text, tooltip=tooltip, danger=danger, compact=True, icon_name=icon_name)
+    btn.setMinimumWidth(max(82, btn.sizeHint().width()))
+    btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    return btn
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._title_bar: AppTitleBar | None = None
+        self._toolbar: QToolBar | None = None
         self.setObjectName("appMainWindow")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self._project = IoProject(name="新项目")
@@ -127,17 +142,31 @@ class MainWindow(QMainWindow):
         self._preview_actions: QWidget | None = None
         self._preview_row_links: list[tuple[int, int]] = []
         self._preview_dirty = False
+        self._recent_group: QGroupBox | None = None
         self._recent_projects_list: QListWidget | None = None
         self._recent_filter_edit: QLineEdit | None = None
         self._recent_open_btn: QPushButton | None = None
         self._recent_remove_btn: QPushButton | None = None
         self._recent_clean_btn: QPushButton | None = None
+        self._project_meta_group: QGroupBox | None = None
+        self._copy_group: QGroupBox | None = None
         self._tabs: QTabWidget | None = None
         self._modified = False          # 未保存修改标记
         self._toast: ToastPopup | None = None
+        self._loading_popup: LoadingPopup | None = None
+        self._immersive_mode = False
+        self._immersive_action: QAction | None = None
+        self._editor_focus_bars: dict[IoTableWidget, QWidget] = {}
+        self._editor_side_panels: dict[IoTableWidget, QWidget] = {}
+        self._editor_filter_edits: dict[IoTableWidget, QLineEdit] = {}
+        self._editor_filled_toggles: dict[IoTableWidget, QPushButton] = {}
+        self._resize_margin = 8
+        self._resize_watch_ids: set[int] = set()
+        self._opening_recent_path: str | None = None
+        self._opening_recent_started_at = 0.0
 
         self.setWindowTitle(_APP_TITLE)
-        self.resize(1380, 860)
+        self.resize(1786, 930)
         self.setStyleSheet(app_stylesheet())
 
         self._preview_refresh_timer = QTimer(self)
@@ -172,8 +201,7 @@ class MainWindow(QMainWindow):
         self._autosave_timer.timeout.connect(self._do_autosave)
         self._reset_autosave_timer()
 
-        # ── 启动时检查自动保存恢复 ───────────────────────────────────────
-        self._autosave_recovery_timer.start()
+        self._install_resize_watchers(self)
 
     # ══════════════════════════════════════════════════════════════════════════
     # 修改状态 & 标题栏
@@ -195,6 +223,81 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if self._title_bar is not None:
             self._title_bar.sync_window_state()
+
+    def _install_resize_watchers(self, root: QWidget) -> None:
+        for widget in [root, *root.findChildren(QWidget)]:
+            widget_id = id(widget)
+            if widget_id in self._resize_watch_ids:
+                continue
+            self._resize_watch_ids.add(widget_id)
+            widget.installEventFilter(self)
+            widget.setMouseTracking(True)
+
+    def _resize_edges_for_pos(self, pos: QPoint):
+        if self.isMaximized() or self.isFullScreen():
+            return None
+        width = self.width()
+        height = self.height()
+        if width <= 0 or height <= 0:
+            return None
+        margin = self._resize_margin
+        edges = None
+        if pos.x() <= margin:
+            edges = Qt.Edge.LeftEdge
+        elif pos.x() >= width - margin:
+            edges = Qt.Edge.RightEdge
+        if pos.y() <= margin:
+            edges = (edges | Qt.Edge.TopEdge) if edges is not None else Qt.Edge.TopEdge
+        elif pos.y() >= height - margin:
+            edges = (edges | Qt.Edge.BottomEdge) if edges is not None else Qt.Edge.BottomEdge
+        return edges
+
+    def _resize_cursor_shape(self, edges) -> Qt.CursorShape | None:
+        if edges is None:
+            return None
+        edge_value = int(getattr(edges, "value", edges))
+        diagonal_a = int(getattr(Qt.Edge.LeftEdge | Qt.Edge.TopEdge, "value", Qt.Edge.LeftEdge | Qt.Edge.TopEdge))
+        diagonal_b = int(getattr(Qt.Edge.RightEdge | Qt.Edge.BottomEdge, "value", Qt.Edge.RightEdge | Qt.Edge.BottomEdge))
+        diagonal_c = int(getattr(Qt.Edge.RightEdge | Qt.Edge.TopEdge, "value", Qt.Edge.RightEdge | Qt.Edge.TopEdge))
+        diagonal_d = int(getattr(Qt.Edge.LeftEdge | Qt.Edge.BottomEdge, "value", Qt.Edge.LeftEdge | Qt.Edge.BottomEdge))
+        if edge_value in (diagonal_a, diagonal_b):
+            return Qt.CursorShape.SizeFDiagCursor
+        if edge_value in (diagonal_c, diagonal_d):
+            return Qt.CursorShape.SizeBDiagCursor
+        if edge_value in (
+            int(getattr(Qt.Edge.LeftEdge, "value", Qt.Edge.LeftEdge)),
+            int(getattr(Qt.Edge.RightEdge, "value", Qt.Edge.RightEdge)),
+        ):
+            return Qt.CursorShape.SizeHorCursor
+        if edge_value in (
+            int(getattr(Qt.Edge.TopEdge, "value", Qt.Edge.TopEdge)),
+            int(getattr(Qt.Edge.BottomEdge, "value", Qt.Edge.BottomEdge)),
+        ):
+            return Qt.CursorShape.SizeVerCursor
+        return None
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: ANN001
+        if isinstance(watched, QWidget) and (watched is self or self.isAncestorOf(watched)):
+            event_type = event.type()
+            if event_type in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress) and hasattr(event, "globalPosition"):
+                pos = self.mapFromGlobal(event.globalPosition().toPoint())
+                edges = self._resize_edges_for_pos(pos)
+                cursor_shape = self._resize_cursor_shape(edges)
+                if cursor_shape is not None:
+                    watched.setCursor(cursor_shape)
+                else:
+                    watched.unsetCursor()
+                if (
+                    event_type == QEvent.Type.MouseButtonPress
+                    and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton
+                    and edges is not None
+                ):
+                    handle = self.windowHandle()
+                    if handle is not None and handle.startSystemResize(edges):
+                        return True
+            elif event_type == QEvent.Type.Leave:
+                watched.unsetCursor()
+        return super().eventFilter(watched, event)
 
     def _dialog_message(
         self,
@@ -220,6 +323,25 @@ class MainWindow(QMainWindow):
         if self._toast is None:
             self._toast = ToastPopup(self)
         self._toast.show_message(title, text, kind)
+
+    def _show_loading_popup(self, title: str, text: str) -> None:
+        if self._loading_popup is None:
+            self._loading_popup = LoadingPopup(self)
+        self._loading_popup.show_message(title, text)
+        QApplication.processEvents()
+
+    def _hide_loading_popup(self) -> None:
+        if self._loading_popup is not None:
+            self._loading_popup.hide()
+
+    def _begin_recent_load_feedback(self, path: str) -> None:
+        self.statusBar().showMessage(f"正在加载 {Path(path).name}...", 0)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+
+    def _end_recent_load_feedback(self) -> None:
+        if QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
 
     def _dialog_text(self, title: str, label: str, text: str = "") -> tuple[str, bool]:
         return TextInputDialog.get_text(self, title, label, text)
@@ -298,6 +420,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(10, 8, 10, 6)
 
         recent_group = QGroupBox("最近项目")
+        self._recent_group = recent_group
         recent_group.setObjectName("recentProjectsGroup")
         recent_group.setMaximumWidth(260)
         recent_group.setMinimumWidth(220)
@@ -347,6 +470,7 @@ class MainWindow(QMainWindow):
 
         # ── 项目元信息 ──────────────────────────────────────────────────────
         meta = QGroupBox("项目信息")
+        self._project_meta_group = meta
         form = QFormLayout(meta)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(6)
@@ -378,6 +502,7 @@ class MainWindow(QMainWindow):
 
         # ── 底部操作按钮 ────────────────────────────────────────────────────
         copy_group = QGroupBox("导出 / 复制到剪贴板")
+        self._copy_group = copy_group
         copy_h = QHBoxLayout(copy_group)
         copy_h.setSpacing(8)
         self._btn_copy_io   = _make_action_btn("IO 表",          "复制当前分区的 IO 表（TSV）", icon_name="clipboard-light")
@@ -584,17 +709,88 @@ class MainWindow(QMainWindow):
         table.setItemDelegateForColumn(COL_COMMENT, NameCompleterDelegate(table, table, source_column=COL_COMMENT))
         table.contentDirty.connect(lambda reason, current=table: self._on_channel_table_dirty(current, reason))
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        outer_h.addWidget(table, 1)
+        find_shortcut = QShortcut(QKeySequence.StandardKey.Find, table)
+        find_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_shortcut.activated.connect(self._focus_current_editor_filter)
+        table._find_shortcut = find_shortcut  # type: ignore[attr-defined]
 
-        # 中间按钮面板
+        table_shell = QWidget()
+        table_shell_layout = QVBoxLayout(table_shell)
+        table_shell_layout.setContentsMargins(0, 0, 0, 0)
+        table_shell_layout.setSpacing(8)
+
+        focus_bar = QWidget()
+        focus_bar.setObjectName("immersiveFocusBar")
+        focus_bar.setHidden(not self._immersive_mode)
+        focus_layout = QVBoxLayout(focus_bar)
+        focus_layout.setContentsMargins(10, 8, 10, 8)
+        focus_layout.setSpacing(6)
+
+        filter_row = QWidget(focus_bar)
+        filter_row.setObjectName("immersiveFocusFilterRow")
+        filter_layout = QHBoxLayout(filter_row)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+
+        focus_badge = QLabel("沉浸模式")
+        focus_badge.setObjectName("immersiveModeBadge")
+        filter_layout.addWidget(focus_badge, 0)
+
+        filter_edit = QLineEdit()
+        filter_edit.setClearButtonEnabled(True)
+        filter_edit.setPlaceholderText("筛选 名称 / 地址 / 注释 / 机架 / 使用  (Ctrl+F)")
+        filter_edit.textChanged.connect(lambda _text, current=table: self._apply_editor_filter(current))
+        filter_layout.addWidget(filter_edit, 1)
+        focus_layout.addWidget(filter_row, 0)
+
+        action_row = QWidget(focus_bar)
+        action_row.setObjectName("immersiveFocusActionsRow")
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(6)
+
+        filled_toggle = _make_immersive_btn("只看有内容")
+        filled_toggle.setCheckable(True)
+        filled_toggle.toggled.connect(lambda _checked, current=table: self._apply_editor_filter(current))
+        action_layout.addWidget(filled_toggle, 0)
+
+        btn_clear_filter = _make_immersive_btn("清空筛选")
+        btn_insert_above = _make_immersive_btn("上插", icon_name="add-light")
+        btn_insert_below = _make_immersive_btn("下插", icon_name="add-light")
+        btn_duplicate = _make_immersive_btn("复制选中", icon_name="clipboard-light")
+        btn_delete_rows = _make_immersive_btn("删除选中", danger=True, icon_name="trash-light")
+        btn_exit_immersive = _make_immersive_btn("退出沉浸")
+        btn_clear_filter.clicked.connect(lambda: filter_edit.clear())
+        btn_insert_above.clicked.connect(lambda: self._insert_row_in(table, below=False))
+        btn_insert_below.clicked.connect(lambda: self._insert_row_in(table, below=True))
+        btn_duplicate.clicked.connect(lambda: self._duplicate_rows_in(table))
+        btn_delete_rows.clicked.connect(lambda: self._del_rows_in(table))
+        btn_exit_immersive.clicked.connect(lambda: self._set_immersive_mode(False))
+        for button in (btn_clear_filter, btn_insert_above, btn_insert_below, btn_duplicate, btn_delete_rows):
+            action_layout.addWidget(button, 0)
+        action_layout.addStretch(1)
+        action_layout.addWidget(btn_exit_immersive, 0)
+        focus_layout.addWidget(action_row, 0)
+
+        table_shell_layout.addWidget(focus_bar, 0)
+        table_shell_layout.addWidget(table, 1)
+        outer_h.addWidget(table_shell, 1)
+
+        # 右侧信息面板
+        side_panel = QWidget()
+        side_panel.setHidden(self._immersive_mode)
+        side_layout = QHBoxLayout(side_panel)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(12)
+
         btn_col = QWidget()
         btn_col.setFixedWidth(170)
         bv = QVBoxLayout(btn_col)
         bv.setContentsMargins(0, 0, 0, 0)
         bv.setSpacing(8)
 
-        btn_add   = _make_action_btn("添加行",   "在末尾追加空行", icon_name="add-light")
-        btn_del   = _make_action_btn("删除选中", "删除选中行", danger=True, icon_name="trash-light")
+        btn_add = _make_action_btn("添加行", "在末尾追加空行", icon_name="add-light")
+        btn_del = _make_action_btn("删除选中", "删除选中行", danger=True, icon_name="trash-light")
         btn_add.setMinimumHeight(36)
         btn_del.setMinimumHeight(36)
         bv.addWidget(btn_add)
@@ -611,8 +807,11 @@ class MainWindow(QMainWindow):
             "Ctrl+Z/Y　撤销/重做<br>"
             "<br>"
             "<b>名称补全</b><br>"
-            "在表格聚焦时生效<br>"
-            "方向键选择建议，Enter 确认"
+            "方向键选择建议，Enter 确认<br>"
+            "<br>"
+            "<b>沉浸模式</b><br>"
+            "F11 切换画布<br>"
+            "Ctrl+F 聚焦筛选"
         )
         shortcuts.setWordWrap(True)
         shortcuts.setStyleSheet(
@@ -622,16 +821,20 @@ class MainWindow(QMainWindow):
         )
         bv.addWidget(shortcuts)
         bv.addStretch()
+        side_layout.addWidget(btn_col, 0)
 
-        outer_h.addWidget(btn_col, 0)
-
-        # 右侧分区信息面板
         zone_panel = ZoneInfoPanel()
         zone_panel.set_zone_by_id(zone_id)
-        outer_h.addWidget(zone_panel, 0)
+        side_layout.addWidget(zone_panel, 0)
+        outer_h.addWidget(side_panel, 0)
 
         btn_add.clicked.connect(lambda: self._add_row_to(table))
         btn_del.clicked.connect(lambda: self._del_rows_in(table))
+
+        self._editor_focus_bars[table] = focus_bar
+        self._editor_side_panels[table] = side_panel
+        self._editor_filter_edits[table] = filter_edit
+        self._editor_filled_toggles[table] = filled_toggle
 
         return outer, table
 
@@ -644,6 +847,10 @@ class MainWindow(QMainWindow):
         while self._tabs.count():
             self._tabs.removeTab(0)
         self._channel_tables.clear()
+        self._editor_focus_bars.clear()
+        self._editor_side_panels.clear()
+        self._editor_filter_edits.clear()
+        self._editor_filled_toggles.clear()
 
         self._tabs.addTab(self._build_preview_tab(), PREVIEW_LABEL)
 
@@ -663,6 +870,7 @@ class MainWindow(QMainWindow):
         self._prev_tab_index = idx
         if idx == 0:
             self._ensure_preview_fresh()
+        self._install_resize_watchers(self)
 
     def _color_tab(self, tab_index: int, zone_id: str) -> None:
         if not self._tabs:
@@ -693,8 +901,93 @@ class MainWindow(QMainWindow):
         table._insert_row(below=True)
         table.setCurrentCell(max(0, table.currentRow()), COL_NAME)
 
+    def _insert_row_in(self, table: IoTableWidget, below: bool) -> None:
+        table._insert_row(below=below)
+        table.setFocus()
+
+    def _duplicate_rows_in(self, table: IoTableWidget) -> None:
+        table.duplicate_selected_rows()
+        table.setFocus()
+
     def _del_rows_in(self, table: IoTableWidget) -> None:
         table._delete_selected_rows()
+
+    def _current_channel_table(self) -> IoTableWidget | None:
+        if self._tabs is None:
+            return None
+        idx = self._tabs.currentIndex() - 1
+        if idx < 0 or idx >= len(self._channel_tables):
+            return None
+        return self._channel_tables[idx]
+
+    def _row_matches_query(self, table: IoTableWidget, row: int, query: str) -> bool:
+        if not query:
+            return True
+        parts: list[str] = []
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            if item and item.text().strip():
+                parts.append(item.text())
+        return query in " ".join(parts).casefold()
+
+    def _clear_editor_row_filter(self, table: IoTableWidget) -> None:
+        for row in range(table.rowCount()):
+            table.setRowHidden(row, False)
+
+    def _apply_editor_filter(self, table: IoTableWidget) -> None:
+        if table not in self._editor_filter_edits:
+            return
+        if not self._immersive_mode:
+            self._clear_editor_row_filter(table)
+            return
+        query = self._editor_filter_edits[table].text().strip().casefold()
+        filled_only = self._editor_filled_toggles[table].isChecked()
+        for row in range(table.rowCount()):
+            has_content = table.row_has_content(row)
+            visible = True
+            if filled_only and not has_content:
+                visible = False
+            if query:
+                visible = has_content and self._row_matches_query(table, row, query)
+            elif not has_content and filled_only:
+                visible = False
+            table.setRowHidden(row, not visible)
+
+    def _focus_current_editor_filter(self) -> None:
+        table = self._current_channel_table()
+        if table is None:
+            return
+        if not self._immersive_mode:
+            self._set_immersive_mode(True)
+        editor = self._editor_filter_edits.get(table)
+        if editor is None:
+            return
+        editor.setFocus()
+        editor.selectAll()
+
+    def _set_immersive_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._immersive_mode = enabled
+        if self._immersive_action is not None and self._immersive_action.isChecked() != enabled:
+            self._immersive_action.blockSignals(True)
+            self._immersive_action.setChecked(enabled)
+            self._immersive_action.blockSignals(False)
+        for widget in (self._recent_group, self._project_meta_group, self._copy_group, self._toolbar):
+            if widget is not None:
+                widget.setHidden(enabled)
+        for table, focus_bar in self._editor_focus_bars.items():
+            focus_bar.setHidden(not enabled)
+            side_panel = self._editor_side_panels.get(table)
+            if side_panel is not None:
+                side_panel.setHidden(enabled)
+            if enabled:
+                self._apply_editor_filter(table)
+            else:
+                self._clear_editor_row_filter(table)
+        if enabled:
+            self.statusBar().showMessage("沉浸模式已开启 · Ctrl+F 筛选当前分区 · F11 退出", 4000)
+        else:
+            self.statusBar().showMessage("已退出沉浸模式", 2500)
 
     def _read_points_from_table(self, table: IoTableWidget) -> list[IoPoint]:
         pts: list[IoPoint] = []
@@ -736,6 +1029,8 @@ class MainWindow(QMainWindow):
     def _on_channel_table_dirty(self, table: IoTableWidget, _reason: str) -> None:
         if self._building_tabs:
             return
+        if self._immersive_mode:
+            self._apply_editor_filter(table)
         self._sync_table_to_project(table)
         self._set_modified(True)
         self._schedule_preview_refresh()
@@ -752,6 +1047,10 @@ class MainWindow(QMainWindow):
         if idx == 0:
             self._sync_preview_channel_list()
             self._ensure_preview_fresh()
+        elif self._immersive_mode:
+            table = self._current_channel_table()
+            if table is not None:
+                self._apply_editor_filter(table)
 
     def _on_tab_bar_double_clicked(self, index: int) -> None:
         if index <= 0 or index >= self._tabs.count():
@@ -807,6 +1106,8 @@ class MainWindow(QMainWindow):
             self._channel_tables.append(tbl)
             tab_idx = self._tabs.addTab(w, name)
             self._color_tab(tab_idx, zone_id)
+            if self._immersive_mode:
+                self._apply_editor_filter(tbl)
             added_any = True
 
         if not added_any:
@@ -816,6 +1117,7 @@ class MainWindow(QMainWindow):
         self._schedule_preview_refresh()
         self._tabs.setCurrentIndex(self._tabs.count() - 1)
         self._set_modified(True)
+        self._install_resize_watchers(self)
 
     def _delete_current_channel(self) -> None:
         assert self._tabs is not None
@@ -844,6 +1146,7 @@ class MainWindow(QMainWindow):
         self.setMenuWidget(self._title_bar)
 
         tb = QToolBar("主工具栏")
+        self._toolbar = tb
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         tb.setIconSize(QSize(16, 16))
@@ -855,11 +1158,13 @@ class MainWindow(QMainWindow):
             shortcut=None,
             tip: str = "",
             icon_name: str = "",
+            checkable: bool = False,
         ) -> QAction:  # noqa: ANN001
             action = QAction(label, self)
             action.triggered.connect(slot)
             if shortcut:
                 action.setShortcut(shortcut)
+            action.setCheckable(checkable)
             if tip:
                 action.setToolTip(tip)
                 action.setStatusTip(tip)
@@ -884,13 +1189,27 @@ class MainWindow(QMainWindow):
             "export_csv": _make_action("导出 CSV…", self._export_csv_io, icon_name="export"),
             "quit": _make_action("退出", self.close, QKeySequence.StandardKey.Quit),
             "preferences": _make_action("偏好设置…", self._open_preferences),
+            "find_current": _make_action("查找当前分区", self._focus_current_editor_filter, QKeySequence.StandardKey.Find),
+            "immersive": _make_action(
+                "沉浸模式",
+                self._set_immersive_mode,
+                QKeySequence(Qt.Key.Key_F11),
+                "聚焦当前分区编辑画布",
+                "focus-light",
+                checkable=True,
+            ),
         }
+        self._immersive_action = actions["immersive"]
+        for action in actions.values():
+            self.addAction(action)
 
         for key in ("new", "open", "save", "save_as"):
             tb.addAction(actions[key])
         tb.addSeparator()
         for key in ("import_excel", "import_first", "export_excel", "export_csv"):
             tb.addAction(actions[key])
+        tb.addSeparator()
+        tb.addAction(actions["immersive"])
         toolbar_icons = {
             "new": "new-light",
             "open": "open-light",
@@ -900,6 +1219,7 @@ class MainWindow(QMainWindow):
             "import_first": "import-light",
             "export_excel": "export-light",
             "export_csv": "export-light",
+            "immersive": "focus-light",
         }
         for key, icon_name in toolbar_icons.items():
             button = tb.widgetForAction(actions[key])
@@ -909,8 +1229,10 @@ class MainWindow(QMainWindow):
         # ── 菜单栏：文件 ──────────────────────────────────────────────────
         file_menu = QMenu("文件", self)
         edit_menu = QMenu("编辑", self)
+        view_menu = QMenu("视图", self)
         self._title_bar.add_menu("文件", file_menu)
         self._title_bar.add_menu("编辑", edit_menu)
+        self._title_bar.add_menu("视图", view_menu)
 
         file_menu.addAction(actions["new"])
         file_menu.addAction(actions["open"])
@@ -928,9 +1250,14 @@ class MainWindow(QMainWindow):
 
         # ── 菜单栏：编辑 ──────────────────────────────────────────────────
         edit_menu.addAction(actions["preferences"])
+        edit_menu.addAction(actions["find_current"])
+
+        # ── 菜单栏：视图 ──────────────────────────────────────────────────
+        view_menu.addAction(actions["immersive"])
 
     def _rebuild_recent_menu(self) -> None:
         """重建"最近文件"子菜单。"""
+        self._prune_missing_recent_projects()
         self._recent_menu.clear()
         recents = get_prefs().recent_files()
         if not recents:
@@ -945,6 +1272,15 @@ class MainWindow(QMainWindow):
             self._recent_menu.addSeparator()
             self._recent_menu.addAction("清空最近文件", self._clear_recent)
         self._rebuild_recent_projects_list()
+
+    def _prune_missing_recent_projects(self) -> bool:
+        prefs = get_prefs()
+        removed_any = False
+        for path in list(prefs.recent_files()):
+            if not Path(path).exists():
+                prefs.remove_recent(path)
+                removed_any = True
+        return removed_any
 
     def _rebuild_recent_projects_list(self) -> None:
         if self._recent_projects_list is None:
@@ -1018,23 +1354,31 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
 
     def _clean_recent_projects(self) -> None:
-        prefs = get_prefs()
-        removed_any = False
-        for path in list(prefs.recent_files()):
-            if not Path(path).exists():
-                prefs.remove_recent(path)
-                removed_any = True
+        removed_any = self._prune_missing_recent_projects()
         if removed_any:
             self._rebuild_recent_menu()
         self.statusBar().showMessage("最近项目已清理", 2500)
 
     def _open_recent(self, path: str) -> None:
-        if not Path(path).exists():
-            self._dialog_warning("最近文件", f"文件不存在：\n{path}")
-            get_prefs().remove_recent(path)
-            self._rebuild_recent_menu()
+        resolved = str(Path(path).resolve())
+        now = time.monotonic()
+        if (
+            self._opening_recent_path == resolved
+            and now - self._opening_recent_started_at < 0.6
+        ):
             return
-        self._do_open_json(path)
+        self._opening_recent_path = resolved
+        self._opening_recent_started_at = now
+        try:
+            if not Path(resolved).exists():
+                self._dialog_warning("最近文件", f"文件不存在：\n{resolved}")
+                get_prefs().remove_recent(resolved)
+                self._rebuild_recent_menu()
+                return
+            self._begin_recent_load_feedback(resolved)
+            self._do_open_json(resolved)
+        finally:
+            self._end_recent_load_feedback()
 
     def _clear_recent(self) -> None:
         get_prefs().clear_recent()

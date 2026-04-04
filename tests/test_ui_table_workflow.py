@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidgetItem,
     QTableWidgetSelectionRange,
@@ -64,6 +65,19 @@ def test_table_keeps_buffer_rows_for_continuous_entry(qtbot) -> None:
     qtbot.addWidget(table)
 
     assert table.rowCount() >= 50
+
+
+def test_table_default_column_widths_match_editor_layout(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    header = table.horizontalHeader()
+
+    assert table.columnWidth(table.COL_NAME) == 60
+    assert table.columnWidth(table.COL_DTYPE) == 100
+    assert table.columnWidth(table.COL_ADDR) == 96
+    assert table.columnWidth(table.COL_RACK) == 100
+    assert table.columnWidth(table.COL_USAGE) == 78
+    assert header.sectionResizeMode(table.COL_COMMENT) == header.ResizeMode.Stretch
 
 
 def test_single_value_paste_fills_selected_block(qtbot) -> None:
@@ -125,6 +139,20 @@ def test_single_cell_edit_uses_undo_redo(qtbot) -> None:
 
     table.redo()
     assert table.item(0, table.COL_NAME).text() == "value"
+
+
+def test_duplicate_selected_rows_copies_row_content(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    table.item(0, table.COL_NAME).setText("sensor_a")
+    table.item(0, table.COL_ADDR).setText("0.00")
+    table.selectRow(0)
+
+    table.duplicate_selected_rows()
+
+    assert table.item(1, table.COL_NAME).text() == "sensor_a"
+    assert table.item(1, table.COL_ADDR).text() == "0.00"
 
 
 def test_fill_down_increments_trailing_numbers(qtbot) -> None:
@@ -260,6 +288,102 @@ def test_preview_sidebar_is_placed_left_of_preview_table(qtbot, monkeypatch) -> 
     assert window._preview_sidebar is not window._preview_table.parentWidget()
 
 
+def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+
+    assert not window._recent_group.isHidden()
+    assert not window._project_meta_group.isHidden()
+    assert not window._copy_group.isHidden()
+    assert window._editor_focus_bars[table].isHidden()
+    assert not window._editor_side_panels[table].isHidden()
+
+    window._set_immersive_mode(True)
+
+    assert window._recent_group.isHidden()
+    assert window._project_meta_group.isHidden()
+    assert window._copy_group.isHidden()
+    assert not window._editor_focus_bars[table].isHidden()
+    assert window._editor_side_panels[table].isHidden()
+
+
+def test_immersive_filter_hides_blank_rows_and_nonmatching_rows(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "CIO 区",
+                [
+                    IoPoint(name="阻挡气缸伸出", data_type="BOOL", address="0.00", comment="伸出到位"),
+                    IoPoint(name="阻挡气缸缩回", data_type="BOOL", address="0.01", comment="缩回到位"),
+                ],
+                zone_id="CIO",
+            )
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=1)
+    table = window._channel_tables[0]
+
+    window._set_immersive_mode(True)
+    window._editor_filter_edits[table].setText("缩回")
+    QApplication.processEvents()
+
+    assert table.isRowHidden(0)
+    assert not table.isRowHidden(1)
+    assert table.isRowHidden(2)
+
+
+def test_focus_current_immersive_filter_targets_active_table(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    editor = window._editor_filter_edits[table]
+    calls: list[str] = []
+
+    monkeypatch.setattr(editor, "setFocus", lambda: calls.append("focus"))
+    monkeypatch.setattr(editor, "selectAll", lambda: calls.append("select"))
+
+    window._set_immersive_mode(True)
+
+    window._focus_current_editor_filter()
+
+    assert calls == ["focus", "select"]
+
+
+def test_immersive_focus_bar_uses_separate_action_row_and_preserves_button_width(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    focus_bar = window._editor_focus_bars[table]
+
+    action_row = focus_bar.findChild(type(focus_bar), "immersiveFocusActionsRow")
+    buttons = action_row.findChildren(QPushButton) if action_row is not None else []
+
+    assert action_row is not None
+    assert focus_bar.layout().count() == 2
+    assert buttons
+    assert all(btn.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Ignored for btn in buttons)
+
+
+def test_immersive_focus_bar_provides_exit_button(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    window._set_immersive_mode(True)
+    focus_bar = window._editor_focus_bars[table]
+    exit_button = next(
+        (button for button in focus_bar.findChildren(QPushButton) if button.text() == "退出沉浸"),
+        None,
+    )
+
+    assert exit_button is not None
+
+    exit_button.click()
+
+    assert not window._immersive_mode
+    assert focus_bar.isHidden()
+
+
 def test_recent_projects_sidebar_lists_and_opens_recent_files(qtbot, monkeypatch, tmp_path) -> None:
     project_a = tmp_path / "alpha.json"
     project_b = tmp_path / "beta.json"
@@ -310,6 +434,79 @@ def test_recent_projects_sidebar_lists_and_opens_recent_files(qtbot, monkeypatch
     qtbot.mouseClick(window._recent_projects_list.viewport(), Qt.MouseButton.LeftButton, pos=item_rect.center())
 
     assert opened == [str(project_b)]
+
+
+def test_recent_project_click_and_activation_do_not_double_open(qtbot, monkeypatch, tmp_path) -> None:
+    project_a = tmp_path / "alpha.json"
+    project_a.write_text("{}", encoding="utf-8")
+
+    class _FakePrefs:
+        def recent_files(self) -> list[str]:
+            return [str(project_a)]
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def clear_recent(self) -> None:
+            pass
+
+        def last_dir(self) -> str:
+            return str(tmp_path)
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def recent_limit(self) -> int:
+            return 10
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    monkeypatch.setattr("omron_io_planner.ui.main_window.get_prefs", lambda: _FakePrefs())
+    monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
+    window = MainWindow()
+    opened: list[str] = []
+    window._confirm_discard = lambda: True
+    window._autosave_timer.stop()
+    monkeypatch.setattr(window, "_do_open_json", lambda path: opened.append(path))
+    qtbot.addWidget(window)
+
+    item = window._recent_projects_list.item(0)
+    window._recent_projects_list.itemClicked.emit(item)
+    QApplication.processEvents()
+    window._recent_projects_list.itemActivated.emit(item)
+    QApplication.processEvents()
+
+    assert opened == [str(project_a)]
+
+
+def test_open_recent_uses_status_loading_feedback_without_popup(qtbot, monkeypatch, tmp_path) -> None:
+    project_a = tmp_path / "alpha.json"
+    project_a.write_text("{}", encoding="utf-8")
+    window = _make_window(qtbot, monkeypatch)
+    seen: list[tuple[str, str, bool]] = []
+    window.show()
+    QApplication.processEvents()
+
+    def _fake_open(path: str) -> None:
+        seen.append((window.statusBar().currentMessage(), path, QApplication.overrideCursor() is not None))
+
+    monkeypatch.setattr(window, "_do_open_json", _fake_open)
+
+    window._open_recent(str(project_a))
+    QApplication.processEvents()
+
+    assert seen == [(f"正在加载 {project_a.name}...", str(project_a.resolve()), True)]
+    assert window._loading_popup is None or not window._loading_popup.isVisible()
 
 
 def test_recent_projects_sidebar_filters_items(qtbot, monkeypatch, tmp_path) -> None:

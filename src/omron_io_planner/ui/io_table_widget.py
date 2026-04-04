@@ -530,7 +530,6 @@ class IoTableWidget(QTableWidget):
     - 名称列智能补全
     - Undo/Redo
     - **整行选择**（阶段四）：点击行头选中整行，支持 Ctrl/Shift 组合
-    - **行拖拽排序**（阶段四）：拖拽行号上下排序，支持 Undo
     """
 
     contentDirty = Signal(str)
@@ -609,11 +608,11 @@ class IoTableWidget(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
-        self.setColumnWidth(self.COL_NAME,  160)
-        self.setColumnWidth(self.COL_DTYPE,  90)
-        self.setColumnWidth(self.COL_ADDR,   80)
-        self.setColumnWidth(self.COL_RACK,   80)
-        self.setColumnWidth(self.COL_USAGE,  60)
+        self.setColumnWidth(self.COL_NAME,   60)
+        self.setColumnWidth(self.COL_DTYPE, 100)
+        self.setColumnWidth(self.COL_ADDR,   96)
+        self.setColumnWidth(self.COL_RACK,  100)
+        self.setColumnWidth(self.COL_USAGE,  78)
         self._ensure_spare_rows()
 
     # ── 撤销/重做 ──────────────────────────────────────────────────────────
@@ -703,6 +702,40 @@ class IoTableWidget(QTableWidget):
 
     def _row_has_visible_data(self, data: list[dict]) -> bool:
         return any(col_data and str(col_data.get("text", "")).strip() for col_data in data)
+
+    def row_has_content(self, row: int) -> bool:
+        if row < 0 or row >= self.rowCount():
+            return False
+        for col in range(self.columnCount()):
+            item = self.item(row, col)
+            if item and item.text().strip():
+                return True
+        return False
+
+    def duplicate_selected_rows(self) -> None:
+        rows = sorted({index.row() for index in self.selectedIndexes()})
+        if not rows and self.currentIndex().isValid():
+            rows = [self.currentRow()]
+        if not rows:
+            return
+
+        snapshots = [self._snapshot_row_data(row) for row in rows]
+        insert_at = rows[-1] + 1
+        self.blockSignals(True)
+        for offset, data in enumerate(snapshots):
+            target_row = insert_at + offset
+            self.insertRow(target_row)
+            for col in range(self.columnCount()):
+                if self.item(target_row, col) is None:
+                    self.setItem(target_row, col, QTableWidgetItem(""))
+            self._restore_row_data(target_row, data)
+        self.blockSignals(False)
+
+        self.clearSelection()
+        for offset in range(len(snapshots)):
+            self.selectRow(insert_at + offset)
+        self.setCurrentCell(insert_at, self.currentColumn() if self.currentColumn() >= 0 else self.COL_NAME)
+        self._after_batch_change("duplicate_rows", insert_at + len(snapshots) - 1)
 
     def _sort_rows_by_address(self, order: Qt.SortOrder) -> None:
         row_snapshots = [self._snapshot_row_data(row) for row in range(self.rowCount())]

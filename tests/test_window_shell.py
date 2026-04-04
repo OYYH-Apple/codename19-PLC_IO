@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import QApplication, QLabel, QToolBar, QToolButton
 
@@ -11,6 +11,7 @@ from omron_io_planner import app as app_module
 from omron_io_planner.models import IoProject
 from omron_io_planner.project_manager import Prefs, autosave, autosave_needs_recovery
 from omron_io_planner.ui.dialogs import MessageDialog, TextInputDialog
+from omron_io_planner.ui.icons import load_icon
 from omron_io_planner.ui.main_window import MainWindow
 from omron_io_planner.ui.style import app_stylesheet
 from omron_io_planner.ui.window_chrome import AppTitleBar
@@ -88,6 +89,92 @@ def test_main_window_has_single_ctrl_s_action(qtbot, monkeypatch) -> None:
     assert len(save_actions) == 1
 
 
+def test_main_window_resize_hit_testing_covers_edges_and_corners(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window.resize(1200, 800)
+
+    top_left = window._resize_edges_for_pos(window.rect().topLeft() + QPoint(1, 1))
+    right_edge = window._resize_edges_for_pos(QPoint(window.width() - 1, window.height() // 2))
+    center = window._resize_edges_for_pos(QPoint(window.width() // 2, window.height() // 2))
+
+    assert top_left == (Qt.Edge.LeftEdge | Qt.Edge.TopEdge)
+    assert right_edge == Qt.Edge.RightEdge
+    assert center is None
+
+
+def test_resize_cursor_shape_accepts_single_edge_values(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+
+    assert window._resize_cursor_shape(Qt.Edge.LeftEdge) == Qt.CursorShape.SizeHorCursor
+    assert (
+        window._resize_cursor_shape(Qt.Edge.LeftEdge | Qt.Edge.TopEdge)
+        == Qt.CursorShape.SizeFDiagCursor
+    )
+
+
+def test_startup_does_not_prompt_autosave_recovery_and_prunes_missing_recents(
+    qtbot,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    valid = tmp_path / "valid.json"
+    valid.write_text("{}", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+
+    class _FakePrefs:
+        def __init__(self) -> None:
+            self._recent = [str(valid), str(missing)]
+
+        def recent_files(self) -> list[str]:
+            return list(self._recent)
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            self._recent = [entry for entry in self._recent if entry != str(path)]
+
+        def clear_recent(self) -> None:
+            self._recent = []
+
+        def recent_limit(self) -> int:
+            return 10
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+        def last_dir(self) -> str:
+            return str(tmp_path)
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+    prefs = _FakePrefs()
+    recovery_prompts: list[tuple[str, str]] = []
+    monkeypatch.setattr("omron_io_planner.ui.main_window.get_prefs", lambda: prefs)
+    monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: True)
+    monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_needs_recovery", lambda: True)
+    monkeypatch.setattr(
+        MainWindow,
+        "_dialog_message",
+        lambda self, title, text, buttons=("确定",): recovery_prompts.append((title, text)) or "忽略",
+    )
+
+    window = MainWindow()
+    window._autosave_timer.stop()
+    qtbot.addWidget(window)
+    qtbot.wait(300)
+
+    assert recovery_prompts == []
+    assert prefs.recent_files() == [str(valid)]
+
+
 def test_title_bar_menu_indicator_uses_right_center_alignment() -> None:
     stylesheet = app_stylesheet()
 
@@ -136,6 +223,13 @@ def test_toolbar_shows_text_beside_white_icons(qtbot, monkeypatch) -> None:
     assert buttons
     assert any(button.text() == "新建" for button in buttons)
     assert all(button.icon().isNull() is False for button in buttons if button.text())
+
+
+def test_immersive_action_uses_white_focus_icon(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    immersive_action = next(action for action in window.findChildren(QAction) if action.text() == "沉浸模式")
+
+    assert immersive_action.icon().cacheKey() == load_icon("focus-light").cacheKey()
 
 
 def test_prefs_recent_limit_trims_recent_file_count(tmp_path, monkeypatch) -> None:
@@ -243,8 +337,8 @@ def test_main_window_preferences_updates_prefs_and_recent_sidebar(qtbot, monkeyp
     assert ("show_recent_full_path", True) in prefs.set_calls
 
 
-def test_app_main_starts_window_maximized(monkeypatch) -> None:
-    shown: list[str] = []
+def test_app_main_starts_window_centered_with_default_geometry(monkeypatch) -> None:
+    shown: list[object] = []
 
     class _FakeApp:
         def __init__(self, argv) -> None:  # noqa: ANN001
@@ -257,9 +351,34 @@ def test_app_main_starts_window_maximized(monkeypatch) -> None:
             shown.append("exec")
             return 0
 
+        class _FakeScreen:
+            def availableGeometry(self) -> QRect:
+                return QRect(0, 0, 2560, 1440)
+
+        def primaryScreen(self):  # noqa: ANN001
+            return self._FakeScreen()
+
     class _FakeWindow:
-        def showMaximized(self) -> None:
-            shown.append("showMaximized")
+        def __init__(self) -> None:
+            self.width_value = 0
+            self.height_value = 0
+
+        def resize(self, width: int, height: int) -> None:
+            self.width_value = width
+            self.height_value = height
+            shown.append(("resize", width, height))
+
+        def width(self) -> int:
+            return self.width_value
+
+        def height(self) -> int:
+            return self.height_value
+
+        def move(self, x: int, y: int) -> None:
+            shown.append(("move", x, y))
+
+        def show(self) -> None:
+            shown.append("show")
 
     monkeypatch.setattr(app_module, "QApplication", _FakeApp)
     monkeypatch.setattr(app_module, "MainWindow", _FakeWindow)
@@ -267,7 +386,9 @@ def test_app_main_starts_window_maximized(monkeypatch) -> None:
 
     app_module.main()
 
-    assert shown[:2] == ["showMaximized", "exec"]
+    assert ("resize", 2125, 1238) in shown
+    assert ("move", 217, 101) in shown
+    assert shown[-2:] == ["exec", "exit:0"]
 
 
 def test_custom_message_dialog_is_frameless(qtbot) -> None:

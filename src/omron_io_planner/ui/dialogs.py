@@ -358,5 +358,38 @@ class ToastPopup(QFrame):
             self.killTimer(self._timer)
             self._timer = 0
             self.hide()
-            return
-        super().timerEvent(event)
+
+
+class LoadingPopup(QFrame):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("appLoadingPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(6)
+
+        self._title = QLabel("", self)
+        self._title.setObjectName("appLoadingPopupTitle")
+        layout.addWidget(self._title)
+
+        self._message = QLabel("", self)
+        self._message.setObjectName("appLoadingPopupMessage")
+        self._message.setWordWrap(True)
+        layout.addWidget(self._message)
+
+    def show_message(self, title: str, message: str) -> None:
+        self._title.setText(title)
+        self._message.setText(message)
+        self.adjustSize()
+
+        parent = self.parentWidget()
+        if parent is not None:
+            x_pos = max(12, (parent.width() - self.width()) // 2)
+            y_pos = max(12, (parent.height() - self.height()) // 2)
+            self.move(x_pos, y_pos)
+
+        self.show()
+        self.raise_()

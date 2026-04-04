@@ -124,6 +124,10 @@ QToolBar QToolButton:hover {{
 QToolBar QToolButton:pressed {{
     background-color: rgba(255,255,255,0.1);
 }}
+QToolBar QToolButton:checked {{
+    background-color: rgba(255,255,255,0.18);
+    border-color: rgba(255,255,255,0.3);
+}}
 
 /* ── GroupBox ──────────────────────────────────────────────────── */
 QGroupBox {{
@@ -184,6 +188,9 @@ QPushButton:hover {{
 QPushButton:pressed {{
     background-color: {C['bg_btn_pressed']};
 }}
+QPushButton:checked {{
+    background-color: {C['bg_btn_pressed']};
+}}
 QPushButton:disabled {{
     background-color: #C0C4D0;
     color: #8890A0;
@@ -193,6 +200,20 @@ QPushButton[danger="true"] {{
 }}
 QPushButton[danger="true"]:hover {{
     background-color: {C['bg_btn_danger_h']};
+}}
+
+/* ── 沉浸模式条 ───────────────────────────────────────────────────── */
+#immersiveFocusBar {{
+    background-color: #EAF0FF;
+    border: 1px solid #C9D5F0;
+    border-radius: {C['radius']};
+}}
+#immersiveModeBadge {{
+    color: #244A86;
+    background-color: rgba(74,111,165,0.14);
+    border-radius: {C['radius_sm']};
+    padding: 4px 8px;
+    font-weight: 600;
 }}
 
 /* ── TabWidget ─────────────────────────────────────────────────── */
@@ -434,6 +455,22 @@ QStatusBar::item {{
 }}
 #appToastMessage {{
     color: rgba(255,255,255,0.92);
+    background: transparent;
+}}
+
+/* ── Loading Popup ─────────────────────────────────────────────── */
+#appLoadingPopup {{
+    background-color: rgba(45,50,80,0.97);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 12px;
+}}
+#appLoadingPopupTitle {{
+    color: #FFFFFF;
+    font-weight: 600;
+    background: transparent;
+}}
+#appLoadingPopupMessage {{
+    color: rgba(255,255,255,0.9);
     background: transparent;
 }}
 
