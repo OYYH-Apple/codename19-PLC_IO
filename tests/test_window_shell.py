@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QToolBar, QToolButton
 
 from omron_io_planner import app as app_module
 from omron_io_planner.models import IoProject
+from omron_io_planner.persistence import load_project_json, save_project_json
 from omron_io_planner.project_manager import Prefs, autosave, autosave_needs_recovery
 from omron_io_planner.ui.dialogs import MessageDialog, TextInputDialog
 from omron_io_planner.ui.icons import load_icon
@@ -436,3 +438,45 @@ def test_save_json_failure_uses_save_failure_prompt(qtbot, monkeypatch, tmp_path
     window._do_save_json(str(tmp_path / "demo.json"))
 
     assert errors == [("保存失败", "磁盘不可写")]
+
+
+def test_project_json_roundtrip_preserves_workspace_and_project_preferences(tmp_path) -> None:
+    path = tmp_path / "project.json"
+    project = IoProject(name="demo")
+    project.project_preferences = {
+        "editor": {"continuous_entry": True, "default_immersive": True},
+        "phrases": {"comment": ["阻挡气缸伸出到位", "阻挡气缸缩回到位"]},
+        "generation_defaults": {"row_count": 8, "name_template": "X{n:02}"},
+    }
+    project.workspace_state = {
+        "active_tab": "CIO 区",
+        "preview_order": ["WR 区", "CIO 区"],
+        "preview_checked": ["WR 区"],
+        "table_layout": {"widths": [80, 100, 120, 420, 100, 88]},
+    }
+
+    save_project_json(project, path)
+    loaded = load_project_json(path)
+
+    assert loaded.project_preferences["editor"]["continuous_entry"] is True
+    assert loaded.project_preferences["phrases"]["comment"][0] == "阻挡气缸伸出到位"
+    assert loaded.workspace_state["preview_order"] == ["WR 区", "CIO 区"]
+
+
+def test_prefs_recent_project_entries_sort_pinned_before_recent(tmp_path, monkeypatch) -> None:
+    prefs_path = tmp_path / "prefs.json"
+    monkeypatch.setattr("omron_io_planner.project_manager._PREFS_FILE", prefs_path)
+    prefs = Prefs()
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text("{}", encoding="utf-8")
+    b.write_text("{}", encoding="utf-8")
+
+    prefs.add_recent(a)
+    prefs.add_recent(b)
+    prefs.set_recent_pinned(a, True)
+
+    entries = prefs.recent_projects()
+
+    assert [Path(entry["path"]).name for entry in entries[:2]] == ["a.json", "b.json"]
+    assert entries[0]["pinned"] is True

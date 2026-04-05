@@ -166,6 +166,18 @@ QLineEdit:focus {{
 QLineEdit::placeholder {{
     color: {C['fg_placeholder']};
 }}
+QPlainTextEdit {{
+    background-color: {C['bg_input']};
+    border: 1px solid {C['border']};
+    border-radius: {C['radius_sm']};
+    padding: 6px 8px;
+    color: {C['fg_text']};
+    selection-background-color: {C['bg_sel']};
+}}
+QPlainTextEdit:focus {{
+    border-color: {C['border_focus']};
+    background-color: #FAFCFF;
+}}
 
 /* ── 按钮 ──────────────────────────────────────────────────────── */
 QPushButton {{
@@ -214,6 +226,9 @@ QPushButton[danger="true"]:hover {{
     border-radius: {C['radius_sm']};
     padding: 4px 8px;
     font-weight: 600;
+}}
+#editorToolsBar {{
+    background: transparent;
 }}
 
 /* ── TabWidget ─────────────────────────────────────────────────── */

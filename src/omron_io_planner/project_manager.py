@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 import os
 import platform
-import shutil
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .models import IoProject
 from .persistence import load_project_json, project_from_dict, save_project_json
@@ -41,11 +40,53 @@ _PREFS_FILE  = _APP_DIR / "prefs.json"
 _AUTOSAVE_FILE = _APP_DIR / "autosave.json"
 _MAX_RECENT  = 10
 
+_DEFAULT_STARTUP_PREFS = {
+    "remember_window_state": False,
+    "saved_window_rect": [],
+    "auto_open_recent": False,
+    "show_recent_sidebar": True,
+}
+
+_DEFAULT_EDITOR_DEFAULTS = {
+    "continuous_entry": True,
+    "enter_navigation": "down",
+    "tab_navigation": "right",
+    "auto_increment_address": True,
+    "inherit_data_type": True,
+    "inherit_rack": True,
+    "inherit_usage": True,
+    "auto_increment_name": True,
+    "auto_increment_comment": True,
+    "suggestions_enabled": True,
+    "suggestion_limit": 8,
+    "default_immersive": False,
+    "row_height": 34,
+    "default_column_layout": {},
+    "name_phrases": [],
+    "comment_phrases": [],
+    "generation_defaults": {
+        "start_address": "",
+        "row_count": 8,
+        "data_type": "BOOL",
+        "name_template": "",
+        "comment_template": "",
+        "rack": "",
+        "usage": "",
+    },
+}
+
+_DEFAULT_RECENT_WORKSPACE_PREFS = {
+    "auto_prune_missing": True,
+    "allow_pinned": True,
+}
+
 
 def _project_to_dict(project: IoProject) -> dict:
     return {
         "name": project.name,
         "plc_prefix": project.plc_prefix,
+        "workspace_state": project.workspace_state,
+        "project_preferences": project.project_preferences,
         "channels": [
             {
                 "name": channel.name,
@@ -94,31 +135,159 @@ class Prefs:
         except Exception:
             pass
 
+    def _merged_group(self, name: str, defaults: dict[str, Any]) -> dict[str, Any]:
+        current = self._data.get(name)
+        merged = json.loads(json.dumps(defaults, ensure_ascii=False))
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+        return merged
+
+    def _set_group(self, name: str, values: dict[str, Any], defaults: dict[str, Any]) -> None:
+        merged = self._merged_group(name, defaults)
+        for key, value in values.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key].update(value)
+            else:
+                merged[key] = value
+        self._data[name] = merged
+        self._save()
+
+    def startup_preferences(self) -> dict[str, Any]:
+        return self._merged_group("startup", _DEFAULT_STARTUP_PREFS)
+
+    def set_startup_preferences(self, values: dict[str, Any]) -> None:
+        self._set_group("startup", values, _DEFAULT_STARTUP_PREFS)
+
+    def editor_defaults(self) -> dict[str, Any]:
+        return self._merged_group("editor_defaults", _DEFAULT_EDITOR_DEFAULTS)
+
+    def set_editor_defaults(self, values: dict[str, Any]) -> None:
+        self._set_group("editor_defaults", values, _DEFAULT_EDITOR_DEFAULTS)
+
+    def recent_workspace_preferences(self) -> dict[str, Any]:
+        return self._merged_group("recent_workspace", _DEFAULT_RECENT_WORKSPACE_PREFS)
+
+    def set_recent_workspace_preferences(self, values: dict[str, Any]) -> None:
+        self._set_group("recent_workspace", values, _DEFAULT_RECENT_WORKSPACE_PREFS)
+
+    def _normalize_recent_entry(self, raw: Any) -> dict[str, Any] | None:
+        path_value = ""
+        pinned = False
+        last_opened = 0.0
+        last_saved = 0.0
+        saved_mtime = 0.0
+        if isinstance(raw, str):
+            path_value = raw
+        elif isinstance(raw, dict):
+            path_value = str(raw.get("path", "")).strip()
+            pinned = bool(raw.get("pinned", False))
+            last_opened = float(raw.get("last_opened", 0.0) or 0.0)
+            last_saved = float(raw.get("last_saved", 0.0) or 0.0)
+            saved_mtime = float(raw.get("saved_mtime", 0.0) or 0.0)
+        if not path_value:
+            return None
+        try:
+            path_value = str(Path(path_value).resolve())
+        except Exception:
+            path_value = str(Path(path_value))
+        return {
+            "path": path_value,
+            "pinned": pinned,
+            "last_opened": last_opened,
+            "last_saved": last_saved,
+            "saved_mtime": saved_mtime,
+        }
+
+    def _sort_recent_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        allow_pinned = bool(self.recent_workspace_preferences().get("allow_pinned", True))
+        return sorted(
+            entries,
+            key=lambda entry: (
+                0 if allow_pinned and bool(entry.get("pinned")) else 1,
+                -float(entry.get("last_opened", 0.0) or 0.0),
+                str(entry.get("path", "")).casefold(),
+            ),
+        )
+
+    def _recent_entries(self) -> list[dict[str, Any]]:
+        raw_entries = self._data.get("recent_projects")
+        entries: list[dict[str, Any]] = []
+        if isinstance(raw_entries, list):
+            for raw in raw_entries:
+                normalized = self._normalize_recent_entry(raw)
+                if normalized is not None:
+                    entries.append(normalized)
+        else:
+            legacy = self._data.get("recent_files", [])
+            if isinstance(legacy, list):
+                for raw in legacy:
+                    normalized = self._normalize_recent_entry(raw)
+                    if normalized is not None:
+                        entries.append(normalized)
+        entries = self._sort_recent_entries(entries)
+        self._data["recent_projects"] = entries[: self.recent_limit()]
+        return list(self._data["recent_projects"])
+
     # ── 最近文件 ──────────────────────────────────────────────────────────
 
+    def recent_projects(self) -> list[dict[str, Any]]:
+        return [dict(entry) for entry in self._recent_entries()]
+
     def recent_files(self) -> list[str]:
-        return list(self._data.get("recent_files", []))
+        return [str(entry["path"]) for entry in self._recent_entries()]
 
     def add_recent(self, path: str | Path) -> None:
         p = str(Path(path).resolve())
-        lst: list[str] = self._data.get("recent_files", [])
-        # 去重并移到头部
-        if p in lst:
-            lst.remove(p)
-        lst.insert(0, p)
-        self._data["recent_files"] = lst[:self.recent_limit()]
+        entries = self._recent_entries()
+        existing = next((entry for entry in entries if entry["path"] == p), None)
+        if existing is None:
+            existing = self._normalize_recent_entry(p)
+            assert existing is not None
+            entries.append(existing)
+        existing["last_opened"] = time.time()
+        self._data["recent_projects"] = self._sort_recent_entries(entries)[: self.recent_limit()]
+        self._save()
+
+    def mark_recent_saved(self, path: str | Path) -> None:
+        p = str(Path(path).resolve())
+        entries = self._recent_entries()
+        existing = next((entry for entry in entries if entry["path"] == p), None)
+        if existing is None:
+            existing = self._normalize_recent_entry(p)
+            assert existing is not None
+            entries.append(existing)
+        existing["last_saved"] = time.time()
+        try:
+            existing["saved_mtime"] = Path(p).stat().st_mtime
+        except Exception:
+            existing["saved_mtime"] = 0.0
+        self._data["recent_projects"] = self._sort_recent_entries(entries)[: self.recent_limit()]
         self._save()
 
     def remove_recent(self, path: str | Path) -> None:
         p = str(Path(path).resolve())
-        lst: list[str] = self._data.get("recent_files", [])
-        if p in lst:
-            lst.remove(p)
-        self._data["recent_files"] = lst
+        entries = [entry for entry in self._recent_entries() if entry["path"] != p]
+        self._data["recent_projects"] = self._sort_recent_entries(entries)
         self._save()
 
     def clear_recent(self) -> None:
-        self._data["recent_files"] = []
+        self._data["recent_projects"] = []
+        self._save()
+
+    def set_recent_pinned(self, path: str | Path, pinned: bool) -> None:
+        p = str(Path(path).resolve())
+        entries = self._recent_entries()
+        existing = next((entry for entry in entries if entry["path"] == p), None)
+        if existing is None:
+            existing = self._normalize_recent_entry(p)
+            assert existing is not None
+            entries.append(existing)
+        existing["pinned"] = bool(pinned)
+        self._data["recent_projects"] = self._sort_recent_entries(entries)[: self.recent_limit()]
         self._save()
 
     def recent_limit(self) -> int:
@@ -126,7 +295,7 @@ class Prefs:
 
     def set_recent_limit(self, value: int) -> None:
         self._data["recent_limit"] = max(1, int(value))
-        self._data["recent_files"] = self.recent_files()[:self.recent_limit()]
+        self._data["recent_projects"] = self._recent_entries()[: self.recent_limit()]
         self._save()
 
     def show_recent_full_path(self) -> bool:

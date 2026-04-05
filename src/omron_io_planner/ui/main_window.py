@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -46,6 +47,7 @@ from ..export import (
 )
 from ..io_excel import import_flat_table, import_io_sheet, save_project_excel
 from ..models import IoChannel, IoPoint, IoProject
+from ..omron_symbol_types import combo_items
 from ..omron_zones import ALL_ZONES, get_zone
 from ..persistence import load_project_json, save_project_json
 from ..project_manager import (
@@ -62,13 +64,16 @@ from .dialogs import (
     ChoiceInputDialog,
     IntInputDialog,
     LoadingPopup,
+    BatchGenerateDialog,
+    BulkRowUpdateDialog,
     MessageDialog,
     PreferencesDialog,
+    ProjectSettingsDialog,
     TextInputDialog,
     ToastPopup,
 )
 from .icons import load_icon
-from .io_table_widget import IoTableWidget
+from .io_table_widget import IoTableWidget, _next_omron_bit, _render_generation_template
 from .name_completer_delegate import NameCompleterDelegate
 from .style import app_stylesheet
 from .window_chrome import AppTitleBar
@@ -86,6 +91,49 @@ COL_USAGE   = IoTableWidget.COL_USAGE
 PREVIEW_LABEL = "📊 全通道预览"
 
 _APP_TITLE = "欧姆龙 IO 分配助手"
+_VALID_DATA_TYPES = set(combo_items())
+_FALLBACK_EDITOR_DEFAULTS = {
+    "continuous_entry": True,
+    "enter_navigation": "down",
+    "tab_navigation": "right",
+    "auto_increment_address": True,
+    "inherit_data_type": True,
+    "inherit_rack": True,
+    "inherit_usage": True,
+    "auto_increment_name": True,
+    "auto_increment_comment": True,
+    "suggestions_enabled": True,
+    "suggestion_limit": 8,
+    "default_immersive": False,
+    "row_height": 34,
+    "default_column_layout": {},
+    "name_phrases": [],
+    "comment_phrases": [],
+    "generation_defaults": {
+        "start_address": "",
+        "row_count": 8,
+        "data_type": "BOOL",
+        "name_template": "",
+        "comment_template": "",
+        "rack": "",
+        "usage": "",
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = json.loads(json.dumps(base, ensure_ascii=False))
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _next_address_value(address: str) -> str:
+    nxt = _next_omron_bit(address)
+    return nxt if nxt else address
 
 
 def _make_action_btn(
@@ -146,10 +194,14 @@ class MainWindow(QMainWindow):
         self._recent_projects_list: QListWidget | None = None
         self._recent_filter_edit: QLineEdit | None = None
         self._recent_open_btn: QPushButton | None = None
+        self._recent_pin_btn: QPushButton | None = None
         self._recent_remove_btn: QPushButton | None = None
         self._recent_clean_btn: QPushButton | None = None
         self._project_meta_group: QGroupBox | None = None
         self._copy_group: QGroupBox | None = None
+        self._validation_group: QGroupBox | None = None
+        self._validation_list: QListWidget | None = None
+        self._validation_issues: list[dict[str, object]] = []
         self._tabs: QTabWidget | None = None
         self._modified = False          # 未保存修改标记
         self._toast: ToastPopup | None = None
@@ -164,6 +216,7 @@ class MainWindow(QMainWindow):
         self._resize_watch_ids: set[int] = set()
         self._opening_recent_path: str | None = None
         self._opening_recent_started_at = 0.0
+        self._restoring_workspace = False
 
         self.setWindowTitle(_APP_TITLE)
         self.resize(1786, 930)
@@ -174,6 +227,11 @@ class MainWindow(QMainWindow):
         self._preview_refresh_timer.setInterval(150)
         self._preview_refresh_timer.timeout.connect(self._refresh_preview_table)
 
+        self._validation_refresh_timer = QTimer(self)
+        self._validation_refresh_timer.setSingleShot(True)
+        self._validation_refresh_timer.setInterval(120)
+        self._validation_refresh_timer.timeout.connect(self._refresh_validation_panel)
+
         self._autosave_recovery_timer = QTimer(self)
         self._autosave_recovery_timer.setSingleShot(True)
         self._autosave_recovery_timer.setInterval(200)
@@ -182,6 +240,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu_toolbar()
         self._rebuild_tabs(select_index=1)
+        startup_prefs = get_prefs().startup_preferences() if hasattr(get_prefs(), "startup_preferences") else {}
+        if self._recent_group is not None and not bool(startup_prefs.get("show_recent_sidebar", True)):
+            self._recent_group.hide()
 
         # ── 状态栏 ──────────────────────────────────────────────────────
         sb = QStatusBar()
@@ -202,6 +263,10 @@ class MainWindow(QMainWindow):
         self._reset_autosave_timer()
 
         self._install_resize_watchers(self)
+        if bool(startup_prefs.get("auto_open_recent", False)):
+            recent_files = get_prefs().recent_files()
+            if recent_files:
+                QTimer.singleShot(0, lambda path=recent_files[0]: self._open_recent(path))
 
     # ══════════════════════════════════════════════════════════════════════════
     # 修改状态 & 标题栏
@@ -334,6 +399,43 @@ class MainWindow(QMainWindow):
         if self._loading_popup is not None:
             self._loading_popup.hide()
 
+    def _global_editor_defaults(self) -> dict[str, object]:
+        prefs = get_prefs()
+        if hasattr(prefs, "editor_defaults"):
+            return dict(prefs.editor_defaults())
+        return json.loads(json.dumps(_FALLBACK_EDITOR_DEFAULTS, ensure_ascii=False))
+
+    def _project_editor_preferences(self) -> dict[str, object]:
+        return dict(self._project.project_preferences.get("editor", {}) or {})
+
+    def _project_phrase_library(self) -> dict[str, list[str]]:
+        phrases = self._project.project_preferences.get("phrases", {}) or {}
+        return {
+            "name": list(phrases.get("name", []) or []),
+            "comment": list(phrases.get("comment", []) or []),
+        }
+
+    def _effective_editor_defaults(self) -> dict[str, object]:
+        return _deep_merge(self._global_editor_defaults(), self._project_editor_preferences())
+
+    def _project_generation_defaults(self) -> dict[str, object]:
+        global_defaults = dict(self._global_editor_defaults().get("generation_defaults", {}) or {})
+        project_defaults = dict(self._project.project_preferences.get("generation_defaults", {}) or {})
+        return _deep_merge(global_defaults, project_defaults)
+
+    def _configure_table_from_preferences(self, table: IoTableWidget) -> None:
+        defaults = self._effective_editor_defaults()
+        table.set_editor_defaults(defaults)
+        phrases = self._project_phrase_library()
+        global_defaults = self._global_editor_defaults()
+        table.set_phrase_library(
+            list(global_defaults.get("name_phrases", []) or []) + phrases["name"],
+            list(global_defaults.get("comment_phrases", []) or []) + phrases["comment"],
+        )
+
+    def _project_view_state(self) -> dict[str, object]:
+        return dict(self._project.workspace_state or {})
+
     def _begin_recent_load_feedback(self, path: str) -> None:
         self.statusBar().showMessage(f"正在加载 {Path(path).name}...", 0)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -371,6 +473,7 @@ class MainWindow(QMainWindow):
         if not self._modified:
             return
         self._flush_all_channel_tables()
+        self._capture_project_workspace_state()
         autosave(self._project, self._project_path)
         t = time.strftime("%H:%M:%S")
         self._autosave_label.setText(f"自动保存 {t}")
@@ -449,12 +552,15 @@ class MainWindow(QMainWindow):
         recent_actions = QHBoxLayout()
         recent_actions.setContentsMargins(0, 0, 0, 0)
         recent_actions.setSpacing(6)
+        self._recent_pin_btn = _make_action_btn("置顶", compact=True)
         self._recent_open_btn = _make_action_btn("打开", compact=True)
         self._recent_remove_btn = _make_action_btn("移除", compact=True)
         self._recent_clean_btn = _make_action_btn("清理失效", compact=True)
+        self._recent_pin_btn.clicked.connect(self._toggle_selected_recent_pin)
         self._recent_open_btn.clicked.connect(self._open_selected_recent_project)
         self._recent_remove_btn.clicked.connect(self._remove_selected_recent_project)
         self._recent_clean_btn.clicked.connect(self._clean_recent_projects)
+        recent_actions.addWidget(self._recent_pin_btn, 1)
         recent_actions.addWidget(self._recent_open_btn, 1)
         recent_actions.addWidget(self._recent_remove_btn, 1)
         recent_actions.addWidget(self._recent_clean_btn, 1)
@@ -515,6 +621,20 @@ class MainWindow(QMainWindow):
             copy_h.addWidget(btn)
         copy_h.addStretch()
         layout.addWidget(copy_group)
+
+        validation_group = QGroupBox("轻量校验")
+        self._validation_group = validation_group
+        validation_layout = QVBoxLayout(validation_group)
+        validation_layout.setContentsMargins(10, 8, 10, 8)
+        validation_layout.setSpacing(6)
+        hint = QLabel("仅提示核心错误；双击问题可直接定位。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #5A6080; font-size: 9pt;")
+        validation_layout.addWidget(hint)
+        self._validation_list = QListWidget(validation_group)
+        self._validation_list.itemDoubleClicked.connect(self._jump_to_validation_issue)
+        validation_layout.addWidget(self._validation_list)
+        layout.addWidget(validation_group)
 
         # 连接
         self._btn_add_ch.clicked.connect(self._add_channel)
@@ -585,9 +705,10 @@ class MainWindow(QMainWindow):
         return w
 
     def _on_preview_item_changed(self, _item: QListWidgetItem) -> None:
-        if self._building_tabs:
+        if self._building_tabs or self._restoring_workspace:
             return
         self._schedule_preview_refresh(immediate=True)
+        self._schedule_validation_refresh()
 
     def _preview_check_all(self) -> None:
         if not self._preview_list:
@@ -597,6 +718,7 @@ class MainWindow(QMainWindow):
             self._preview_list.item(i).setCheckState(Qt.CheckState.Checked)
         self._preview_list.blockSignals(False)
         self._schedule_preview_refresh(immediate=True)
+        self._schedule_validation_refresh()
 
     def _preview_check_none(self) -> None:
         if not self._preview_list:
@@ -606,6 +728,7 @@ class MainWindow(QMainWindow):
             self._preview_list.item(i).setCheckState(Qt.CheckState.Unchecked)
         self._preview_list.blockSignals(False)
         self._schedule_preview_refresh(immediate=True)
+        self._schedule_validation_refresh()
 
     def _sync_preview_channel_list(self) -> None:
         if not self._preview_list:
@@ -683,6 +806,104 @@ class MainWindow(QMainWindow):
             self._preview_refresh_timer.stop()
             self._refresh_preview_table()
 
+    def _schedule_validation_refresh(self) -> None:
+        if self._building_tabs or self._restoring_workspace:
+            return
+        self._validation_refresh_timer.start()
+
+    def _collect_validation_issues(self) -> list[dict[str, object]]:
+        issues: list[dict[str, object]] = []
+        seen_addresses: dict[str, tuple[int, int]] = {}
+        for channel_index, channel in enumerate(self._project.channels):
+            for row_index, point in enumerate(channel.points):
+                address = point.address.strip()
+                if address:
+                    prior = seen_addresses.get(address)
+                    if prior is not None:
+                        issues.append(
+                            {
+                                "code": "duplicate_address",
+                                "message": f"{channel.name} / 第 {row_index + 1} 行地址重复：{address}",
+                                "channel_index": channel_index,
+                                "row_index": row_index,
+                            }
+                        )
+                    else:
+                        seen_addresses[address] = (channel_index, row_index)
+                if address and not point.name.strip():
+                    issues.append(
+                        {
+                            "code": "missing_name",
+                            "message": f"{channel.name} / 第 {row_index + 1} 行已填写地址但名称为空",
+                            "channel_index": channel_index,
+                            "row_index": row_index,
+                        }
+                    )
+                if point.data_type.strip().upper() not in _VALID_DATA_TYPES:
+                    issues.append(
+                        {
+                            "code": "invalid_data_type",
+                            "message": f"{channel.name} / 第 {row_index + 1} 行数据类型无效：{point.data_type}",
+                            "channel_index": channel_index,
+                            "row_index": row_index,
+                        }
+                    )
+        if not self._selected_preview_channel_order():
+            issues.append(
+                {
+                    "code": "empty_preview",
+                    "message": "全通道预览未勾选任何分区",
+                    "channel_index": -1,
+                    "row_index": -1,
+                }
+            )
+        return issues
+
+    def _refresh_validation_panel(self) -> None:
+        self._validation_issues = self._collect_validation_issues()
+        if self._validation_list is None or self._validation_group is None:
+            return
+        self._validation_list.clear()
+        for issue in self._validation_issues:
+            item = QListWidgetItem(str(issue["message"]))
+            item.setData(Qt.ItemDataRole.UserRole, issue)
+            self._validation_list.addItem(item)
+        self._validation_group.setTitle(f"轻量校验（{len(self._validation_issues)}）")
+        self._validation_group.setHidden(not self._validation_issues)
+
+    def _jump_to_validation_issue(self, item: QListWidgetItem) -> None:
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(issue, dict):
+            return
+        channel_index = int(issue.get("channel_index", -1))
+        row_index = int(issue.get("row_index", -1))
+        if issue.get("code") == "empty_preview":
+            if self._tabs is not None:
+                self._tabs.setCurrentIndex(0)
+            return
+        if channel_index < 0 or channel_index >= len(self._channel_tables) or self._tabs is None:
+            return
+        self._tabs.setCurrentIndex(channel_index + 1)
+        table = self._channel_tables[channel_index]
+        if 0 <= row_index < table.rowCount():
+            table.setCurrentCell(row_index, COL_NAME)
+            table.scrollToItem(table.item(row_index, COL_NAME))
+
+    def _confirm_export_validation(self) -> bool:
+        issues = self._collect_validation_issues()
+        if not issues:
+            return True
+        summary = "\n".join(f"• {issue['message']}" for issue in issues[:3])
+        choice = self._dialog_message(
+            "导出前检查",
+            f"检测到 {len(issues)} 个潜在问题：\n{summary}\n\n是否继续导出？",
+            buttons=("查看问题", "继续导出", "取消"),
+        )
+        if choice == "查看问题" and self._validation_list is not None and self._validation_list.count():
+            self._jump_to_validation_issue(self._validation_list.item(0))
+            return False
+        return choice == "继续导出"
+
     def _on_preview_item_double_clicked(self, item: QTableWidgetItem) -> None:
         row = item.row()
         if row < 0 or row >= len(self._preview_row_links) or self._tabs is None:
@@ -707,6 +928,7 @@ class MainWindow(QMainWindow):
         table.setItemDelegateForColumn(COL_DTYPE, DataTypeDelegate(table))
         table.setItemDelegateForColumn(COL_NAME, NameCompleterDelegate(table, table))
         table.setItemDelegateForColumn(COL_COMMENT, NameCompleterDelegate(table, table, source_column=COL_COMMENT))
+        self._configure_table_from_preferences(table)
         table.contentDirty.connect(lambda reason, current=table: self._on_channel_table_dirty(current, reason))
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         find_shortcut = QShortcut(QKeySequence.StandardKey.Find, table)
@@ -718,6 +940,25 @@ class MainWindow(QMainWindow):
         table_shell_layout = QVBoxLayout(table_shell)
         table_shell_layout.setContentsMargins(0, 0, 0, 0)
         table_shell_layout.setSpacing(8)
+
+        tools_bar = QWidget()
+        tools_bar.setObjectName("editorToolsBar")
+        tools_layout = QHBoxLayout(tools_bar)
+        tools_layout.setContentsMargins(0, 0, 0, 0)
+        tools_layout.setSpacing(6)
+        btn_generate = _make_action_btn("批量生成", compact=True)
+        btn_bulk_rows = _make_action_btn("批量设置", compact=True)
+        btn_prefix = _make_action_btn("加前缀", compact=True)
+        btn_suffix = _make_action_btn("加后缀", compact=True)
+        btn_number = _make_action_btn("加编号", compact=True)
+        for button in (btn_generate, btn_bulk_rows, btn_prefix, btn_suffix, btn_number):
+            tools_layout.addWidget(button, 0)
+        tools_layout.addStretch(1)
+        btn_generate.clicked.connect(lambda: self._open_batch_generate(table))
+        btn_bulk_rows.clicked.connect(lambda: self._open_bulk_row_update(table))
+        btn_prefix.clicked.connect(lambda: self._open_bulk_text_transform(table, "prefix"))
+        btn_suffix.clicked.connect(lambda: self._open_bulk_text_transform(table, "suffix"))
+        btn_number.clicked.connect(lambda: self._open_bulk_text_transform(table, "number"))
 
         focus_bar = QWidget()
         focus_bar.setObjectName("immersiveFocusBar")
@@ -772,6 +1013,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(btn_exit_immersive, 0)
         focus_layout.addWidget(action_row, 0)
 
+        table_shell_layout.addWidget(tools_bar, 0)
         table_shell_layout.addWidget(focus_bar, 0)
         table_shell_layout.addWidget(table, 1)
         outer_h.addWidget(table_shell, 1)
@@ -838,6 +1080,115 @@ class MainWindow(QMainWindow):
 
         return outer, table
 
+    def _capture_project_workspace_state(self) -> None:
+        if self._tabs is None:
+            return
+        state = dict(self._project.workspace_state or {})
+        current_index = self._tabs.currentIndex()
+        if current_index <= 0:
+            state["active_tab"] = PREVIEW_LABEL
+        elif current_index - 1 < len(self._project.channels):
+            state["active_tab"] = self._project.channels[current_index - 1].name
+        if self._preview_list is not None:
+            state["preview_order"] = [
+                self._preview_list.item(index).text()
+                for index in range(self._preview_list.count())
+            ]
+            state["preview_checked"] = [
+                self._preview_list.item(index).text()
+                for index in range(self._preview_list.count())
+                if self._preview_list.item(index).checkState() == Qt.CheckState.Checked
+            ]
+        if self._channel_tables:
+            state["table_layout"] = self._channel_tables[0].layout_state()
+        filters: dict[str, dict[str, object]] = {}
+        for index, table in enumerate(self._channel_tables):
+            if index >= len(self._project.channels):
+                continue
+            filters[self._project.channels[index].name] = {
+                "query": self._editor_filter_edits[table].text(),
+                "filled_only": self._editor_filled_toggles[table].isChecked(),
+            }
+        state["filters"] = filters
+        state["immersive_mode"] = self._immersive_mode
+        self._project.workspace_state = state
+
+    def _restore_preview_workspace_state(self, state: dict[str, object]) -> None:
+        if self._preview_list is None:
+            return
+        preferred_order = [str(name) for name in state.get("preview_order", []) if str(name)]
+        preferred_checked = {str(name) for name in state.get("preview_checked", []) if str(name)}
+        existing = []
+        for index in range(self._preview_list.count()):
+            item = self._preview_list.item(index)
+            existing.append(
+                {
+                    "name": item.text(),
+                    "checked": item.checkState(),
+                    "color": item.foreground(),
+                }
+            )
+        by_name = {entry["name"]: entry for entry in existing}
+        ordered_names = [name for name in preferred_order if name in by_name]
+        ordered_names.extend(entry["name"] for entry in existing if entry["name"] not in ordered_names)
+        self._preview_list.blockSignals(True)
+        self._preview_list.clear()
+        for name in ordered_names:
+            entry = by_name[name]
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setForeground(entry["color"])
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if name in preferred_checked
+                else Qt.CheckState.Unchecked if preferred_checked else entry["checked"]
+            )
+            self._preview_list.addItem(item)
+        self._preview_list.blockSignals(False)
+
+    def _apply_project_workspace_state(self, fallback_index: int = 1) -> int:
+        state = self._project_view_state()
+        self._restoring_workspace = True
+        try:
+            self._restore_preview_workspace_state(state)
+            table_layout = state.get("table_layout")
+            if not isinstance(table_layout, dict) or not table_layout:
+                table_layout = (
+                    self._project.project_preferences.get("column_layout")
+                    or self._global_editor_defaults().get("default_column_layout")
+                    or {}
+                )
+            if isinstance(table_layout, dict):
+                for table in self._channel_tables:
+                    table.apply_layout_state(table_layout)
+            filters = state.get("filters")
+            if isinstance(filters, dict):
+                for index, table in enumerate(self._channel_tables):
+                    if index >= len(self._project.channels):
+                        continue
+                    channel_name = self._project.channels[index].name
+                    filter_state = filters.get(channel_name, {})
+                    if not isinstance(filter_state, dict):
+                        continue
+                    self._editor_filter_edits[table].setText(str(filter_state.get("query", "") or ""))
+                    self._editor_filled_toggles[table].setChecked(bool(filter_state.get("filled_only", False)))
+            immersive_mode = bool(
+                state.get(
+                    "immersive_mode",
+                    self._effective_editor_defaults().get("default_immersive", False),
+                )
+            )
+            self._set_immersive_mode(immersive_mode)
+            active_tab = str(state.get("active_tab", "") or "")
+            if active_tab == PREVIEW_LABEL:
+                return 0
+            for index, channel in enumerate(self._project.channels, start=1):
+                if channel.name == active_tab:
+                    return index
+        finally:
+            self._restoring_workspace = False
+        return max(0, min(fallback_index, self._tabs.count() - 1 if self._tabs is not None else 0))
+
     # ── Tab 管理 ──────────────────────────────────────────────────────────
 
     def _rebuild_tabs(self, select_index: int = 0) -> None:
@@ -865,11 +1216,13 @@ class MainWindow(QMainWindow):
         self._building_tabs = False
         self._preview_dirty = True
         self._prev_tab_index = None
-        idx = max(0, min(select_index, self._tabs.count() - 1))
+        idx = self._apply_project_workspace_state(select_index)
+        idx = max(0, min(idx, self._tabs.count() - 1))
         self._tabs.setCurrentIndex(idx)
         self._prev_tab_index = idx
         if idx == 0:
             self._ensure_preview_fresh()
+        self._refresh_validation_panel()
         self._install_resize_watchers(self)
 
     def _color_tab(self, tab_index: int, zone_id: str) -> None:
@@ -911,6 +1264,76 @@ class MainWindow(QMainWindow):
 
     def _del_rows_in(self, table: IoTableWidget) -> None:
         table._delete_selected_rows()
+
+    def _open_batch_generate(self, table: IoTableWidget) -> None:
+        dialog = BatchGenerateDialog(defaults=self._project_generation_defaults(), parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        self._apply_batch_generate(table, dialog.values())
+
+    def _apply_batch_generate(self, table: IoTableWidget, spec: dict[str, object]) -> None:
+        row_count = max(1, int(spec.get("row_count", 1) or 1))
+        start_address = str(spec.get("start_address", "") or "").strip()
+        data_type = str(spec.get("data_type", "BOOL") or "BOOL").strip() or "BOOL"
+        name_template = str(spec.get("name_template", "") or "")
+        comment_template = str(spec.get("comment_template", "") or "")
+        rack = str(spec.get("rack", "") or "")
+        usage = str(spec.get("usage", "") or "")
+
+        start_row = table.currentRow() if table.currentRow() >= 0 else 0
+        changes: list[tuple[int, int, str, str]] = []
+        current_address = start_address
+        for offset in range(row_count):
+            row = start_row + offset
+            table._ensure_row_available(row)
+            address = current_address if current_address else ""
+            values = {
+                COL_NAME: _render_generation_template(name_template, offset, address),
+                COL_DTYPE: data_type,
+                COL_ADDR: address,
+                COL_COMMENT: _render_generation_template(comment_template, offset, address),
+                COL_RACK: rack,
+                COL_USAGE: usage,
+            }
+            for col, new_value in values.items():
+                old = table.item(row, col).text() if table.item(row, col) else ""
+                if old != new_value:
+                    changes.append((row, col, old, new_value))
+            if current_address:
+                current_address = _next_address_value(current_address)
+        table.apply_multi_changes(changes, "批量生成", "generate")
+        self._sync_table_to_project(table)
+        self._set_modified(True)
+        self._schedule_preview_refresh()
+
+    def _open_bulk_row_update(self, table: IoTableWidget) -> None:
+        dialog = BulkRowUpdateDialog(parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        values = {key: value for key, value in dialog.values().items() if value}
+        if not values:
+            return
+        table.bulk_update_selected_rows(values)
+        self._sync_table_to_project(table)
+        self._set_modified(True)
+        self._schedule_preview_refresh()
+
+    def _open_bulk_text_transform(self, table: IoTableWidget, mode: str) -> None:
+        if mode == "number":
+            value, ok = self._dialog_int("批量加编号", "起始编号：", 1, 1, 9999)
+            if not ok:
+                return
+            table.bulk_transform_selection("number", start=value)
+        else:
+            title = "批量加前缀" if mode == "prefix" else "批量加后缀"
+            label = "请输入前缀：" if mode == "prefix" else "请输入后缀："
+            text, ok = self._dialog_text(title, label)
+            if not ok or not text:
+                return
+            table.bulk_transform_selection(mode, text)
+        self._sync_table_to_project(table)
+        self._set_modified(True)
+        self._schedule_preview_refresh()
 
     def _current_channel_table(self) -> IoTableWidget | None:
         if self._tabs is None:
@@ -972,9 +1395,12 @@ class MainWindow(QMainWindow):
             self._immersive_action.blockSignals(True)
             self._immersive_action.setChecked(enabled)
             self._immersive_action.blockSignals(False)
-        for widget in (self._recent_group, self._project_meta_group, self._copy_group, self._toolbar):
+        startup_prefs = get_prefs().startup_preferences() if hasattr(get_prefs(), "startup_preferences") else {}
+        for widget in (self._project_meta_group, self._copy_group, self._toolbar):
             if widget is not None:
                 widget.setHidden(enabled)
+        if self._recent_group is not None:
+            self._recent_group.setHidden(enabled or not bool(startup_prefs.get("show_recent_sidebar", True)))
         for table, focus_bar in self._editor_focus_bars.items():
             focus_bar.setHidden(not enabled)
             side_panel = self._editor_side_panels.get(table)
@@ -1027,13 +1453,14 @@ class MainWindow(QMainWindow):
         self._project.channels[ci].points = self._read_points_from_table(table)
 
     def _on_channel_table_dirty(self, table: IoTableWidget, _reason: str) -> None:
-        if self._building_tabs:
+        if self._building_tabs or self._restoring_workspace:
             return
         if self._immersive_mode:
             self._apply_editor_filter(table)
         self._sync_table_to_project(table)
         self._set_modified(True)
         self._schedule_preview_refresh()
+        self._schedule_validation_refresh()
 
     def _flush_all_channel_tables(self) -> None:
         for i, tbl in enumerate(self._channel_tables):
@@ -1189,6 +1616,8 @@ class MainWindow(QMainWindow):
             "export_csv": _make_action("导出 CSV…", self._export_csv_io, icon_name="export"),
             "quit": _make_action("退出", self.close, QKeySequence.StandardKey.Quit),
             "preferences": _make_action("偏好设置…", self._open_preferences),
+            "project_settings": _make_action("项目设置…", self._open_project_settings),
+            "reset_project_view": _make_action("重置当前项目视图", self._reset_current_project_view),
             "find_current": _make_action("查找当前分区", self._focus_current_editor_filter, QKeySequence.StandardKey.Find),
             "immersive": _make_action(
                 "沉浸模式",
@@ -1250,6 +1679,8 @@ class MainWindow(QMainWindow):
 
         # ── 菜单栏：编辑 ──────────────────────────────────────────────────
         edit_menu.addAction(actions["preferences"])
+        edit_menu.addAction(actions["project_settings"])
+        edit_menu.addAction(actions["reset_project_view"])
         edit_menu.addAction(actions["find_current"])
 
         # ── 菜单栏：视图 ──────────────────────────────────────────────────
@@ -1257,15 +1688,26 @@ class MainWindow(QMainWindow):
 
     def _rebuild_recent_menu(self) -> None:
         """重建"最近文件"子菜单。"""
-        self._prune_missing_recent_projects()
+        recent_prefs = get_prefs()
+        recent_workspace = (
+            recent_prefs.recent_workspace_preferences()
+            if hasattr(recent_prefs, "recent_workspace_preferences")
+            else {"auto_prune_missing": True}
+        )
+        if recent_workspace.get("auto_prune_missing", True):
+            self._prune_missing_recent_projects()
         self._recent_menu.clear()
-        recents = get_prefs().recent_files()
+        recents = recent_prefs.recent_projects() if hasattr(recent_prefs, "recent_projects") else [
+            {"path": path, "pinned": False} for path in recent_prefs.recent_files()
+        ]
         if not recents:
             act = self._recent_menu.addAction("（无最近文件）")
             act.setEnabled(False)
         else:
-            for i, p in enumerate(recents):
-                label = f"&{i+1}  {Path(p).name}  —  {p}" if i < 9 else f"   {Path(p).name}  —  {p}"
+            for i, entry in enumerate(recents):
+                p = str(entry["path"])
+                pin = "置顶 · " if bool(entry.get("pinned", False)) else ""
+                label = f"&{i+1}  {pin}{Path(p).name}  —  {p}" if i < 9 else f"   {pin}{Path(p).name}  —  {p}"
                 act = self._recent_menu.addAction(label)
                 # 捕获变量
                 act.triggered.connect(lambda checked=False, path=p: self._open_recent(path))
@@ -1286,21 +1728,31 @@ class MainWindow(QMainWindow):
         if self._recent_projects_list is None:
             return
         prefs = get_prefs()
-        recents = prefs.recent_files()
+        recents = prefs.recent_projects() if hasattr(prefs, "recent_projects") else [
+            {"path": path, "pinned": False, "last_opened": 0.0, "last_saved": 0.0}
+            for path in prefs.recent_files()
+        ]
         self._recent_projects_list.clear()
         show_full_path = prefs.show_recent_full_path() if hasattr(prefs, "show_recent_full_path") else False
-        for path in recents:
+        for entry in recents:
+            path = str(entry["path"])
             file_path = Path(path)
+            title = f"置顶 · {file_path.name}" if bool(entry.get("pinned", False)) else file_path.name
+            last_opened = float(entry.get("last_opened", 0.0) or 0.0)
+            last_saved = float(entry.get("last_saved", 0.0) or 0.0)
             if file_path.exists():
                 modified = time.strftime("%Y-%m-%d %H:%M", time.localtime(file_path.stat().st_mtime))
                 display_path = str(file_path.resolve()) if show_full_path else str(file_path.parent)
-                detail = f"{display_path}\n最近修改：{modified}"
+                opened_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_opened)) if last_opened else "未记录"
+                saved_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_saved)) if last_saved else modified
+                detail = f"{display_path}\n最近打开：{opened_text}  ·  最近保存：{saved_text}"
             else:
                 display_path = str(file_path.resolve()) if show_full_path else str(file_path.parent)
                 detail = f"{display_path}\n文件不存在"
-            item = QListWidgetItem(f"{file_path.name}\n{detail}")
+            item = QListWidgetItem(f"{title}\n{detail}")
             item.setToolTip(path)
             item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(entry.get("pinned", False)))
             item.setSizeHint(QSize(0, 54))
             if self._project_path and Path(path) == self._project_path:
                 item.setBackground(QColor("#E8EFFD"))
@@ -1334,8 +1786,16 @@ class MainWindow(QMainWindow):
         path = item.data(Qt.ItemDataRole.UserRole)
         return path if isinstance(path, str) else None
 
+    def _selected_recent_project_pinned(self) -> bool:
+        if self._recent_projects_list is None or self._recent_projects_list.currentItem() is None:
+            return False
+        return bool(self._recent_projects_list.currentItem().data(Qt.ItemDataRole.UserRole + 1))
+
     def _refresh_recent_project_actions(self) -> None:
         has_current = self._selected_recent_project_path() is not None
+        if self._recent_pin_btn is not None:
+            self._recent_pin_btn.setEnabled(has_current)
+            self._recent_pin_btn.setText("取消置顶" if self._selected_recent_project_pinned() else "置顶")
         if self._recent_open_btn is not None:
             self._recent_open_btn.setEnabled(has_current)
         if self._recent_remove_btn is not None:
@@ -1353,6 +1813,15 @@ class MainWindow(QMainWindow):
         get_prefs().remove_recent(path)
         self._rebuild_recent_menu()
 
+    def _toggle_selected_recent_pin(self) -> None:
+        path = self._selected_recent_project_path()
+        if not path:
+            return
+        prefs = get_prefs()
+        if hasattr(prefs, "set_recent_pinned"):
+            prefs.set_recent_pinned(path, not self._selected_recent_project_pinned())
+        self._rebuild_recent_menu()
+
     def _clean_recent_projects(self) -> None:
         removed_any = self._prune_missing_recent_projects()
         if removed_any:
@@ -1366,6 +1835,8 @@ class MainWindow(QMainWindow):
             self._opening_recent_path == resolved
             and now - self._opening_recent_started_at < 0.6
         ):
+            return
+        if not self._confirm_discard():
             return
         self._opening_recent_path = resolved
         self._opening_recent_started_at = now
@@ -1386,13 +1857,30 @@ class MainWindow(QMainWindow):
 
     def _open_preferences(self) -> None:
         prefs = get_prefs()
-        dialog = PreferencesDialog(
-            autosave_enabled=prefs.autosave_enabled(),
-            autosave_interval=prefs.autosave_interval(),
-            recent_limit=prefs.recent_limit(),
-            show_recent_full_path=prefs.show_recent_full_path(),
-            parent=self,
-        )
+        dialog_kwargs = {
+            "autosave_enabled": prefs.autosave_enabled(),
+            "autosave_interval": prefs.autosave_interval(),
+            "recent_limit": prefs.recent_limit(),
+            "show_recent_full_path": prefs.show_recent_full_path(),
+            "startup_preferences": prefs.startup_preferences() if hasattr(prefs, "startup_preferences") else None,
+            "editor_defaults": prefs.editor_defaults() if hasattr(prefs, "editor_defaults") else None,
+            "recent_workspace_preferences": (
+                prefs.recent_workspace_preferences()
+                if hasattr(prefs, "recent_workspace_preferences")
+                else None
+            ),
+            "parent": self,
+        }
+        try:
+            dialog = PreferencesDialog(**dialog_kwargs)
+        except TypeError:
+            dialog = PreferencesDialog(
+                autosave_enabled=dialog_kwargs["autosave_enabled"],
+                autosave_interval=dialog_kwargs["autosave_interval"],
+                recent_limit=dialog_kwargs["recent_limit"],
+                show_recent_full_path=dialog_kwargs["show_recent_full_path"],
+                parent=self,
+            )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         values = dialog.values()
@@ -1400,13 +1888,49 @@ class MainWindow(QMainWindow):
         prefs.set_autosave_interval(int(values["autosave_interval"]))
         prefs.set_recent_limit(int(values["recent_limit"]))
         prefs.set_show_recent_full_path(bool(values["show_recent_full_path"]))
+        if hasattr(prefs, "set_startup_preferences"):
+            prefs.set_startup_preferences(dict(values.get("startup", {})))
+        if hasattr(prefs, "set_editor_defaults"):
+            prefs.set_editor_defaults(dict(values.get("editor_defaults", {})))
+        if hasattr(prefs, "set_recent_workspace_preferences"):
+            prefs.set_recent_workspace_preferences(dict(values.get("recent_workspace", {})))
         self._reset_autosave_timer()
+        for table in self._channel_tables:
+            self._configure_table_from_preferences(table)
+        if self._recent_group is not None:
+            show_recent_sidebar = True
+            if hasattr(prefs, "startup_preferences"):
+                show_recent_sidebar = bool(prefs.startup_preferences().get("show_recent_sidebar", True))
+            self._recent_group.setHidden(self._immersive_mode or not show_recent_sidebar)
         self._rebuild_recent_menu()
         self.statusBar().showMessage("偏好设置已更新", 3000)
         self._show_toast("偏好设置", "软件偏好已保存", "success")
 
     def _autosave_settings(self) -> None:
         self._open_preferences()
+
+    def _open_project_settings(self) -> None:
+        dialog = ProjectSettingsDialog(editor_preferences=self._project.project_preferences, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        editor = dict(self._project.project_preferences.get("editor", {}) or {})
+        editor.update(dict(values["editor"]))
+        self._project.project_preferences["editor"] = editor
+        self._project.project_preferences["generation_defaults"] = dict(values["generation_defaults"])
+        self._project.project_preferences["phrases"] = dict(values["phrases"])
+        if bool(values.get("capture_layout")) and self._channel_tables:
+            self._project.project_preferences["column_layout"] = self._channel_tables[0].layout_state()
+        for table in self._channel_tables:
+            self._configure_table_from_preferences(table)
+        self._set_modified(True)
+        self._show_toast("项目设置", "项目级编辑偏好已更新", "success")
+
+    def _reset_current_project_view(self) -> None:
+        self._project.workspace_state = {}
+        self._rebuild_tabs(select_index=1)
+        self._set_modified(True)
+        self.statusBar().showMessage("当前项目视图已重置", 3000)
 
     # ══════════════════════════════════════════════════════════════════════════
     # 元数据
@@ -1535,7 +2059,9 @@ class MainWindow(QMainWindow):
         prefs.set_last_dir(path)
         self._rebuild_recent_menu()
         self._sync_meta_from_project()
-        self._rebuild_tabs(select_index=1)
+        active_tab = self._project.workspace_state.get("active_tab", "") if isinstance(self._project.workspace_state, dict) else ""
+        select_index = 0 if active_tab == PREVIEW_LABEL else 1
+        self._rebuild_tabs(select_index=select_index)
         self._set_modified(False)
         self._update_title()
         self.statusBar().showMessage(f"✔ 已打开 {path}", 3000)
@@ -1559,11 +2085,14 @@ class MainWindow(QMainWindow):
     def _do_save_json(self, path: str) -> None:
         self._on_meta_changed()
         self._flush_all_channel_tables()
+        self._capture_project_workspace_state()
         try:
             save_project_json(self._project, path)
             self._project_path = Path(path)
             prefs = get_prefs()
             prefs.add_recent(path)
+            if hasattr(prefs, "mark_recent_saved"):
+                prefs.mark_recent_saved(path)
             prefs.set_last_dir(path)
             self._rebuild_recent_menu()
             self._set_modified(False)
@@ -1625,6 +2154,8 @@ class MainWindow(QMainWindow):
 
     def _export_excel(self) -> None:
         self._flush_all_channel_tables()
+        if not self._confirm_export_validation():
+            return
         prefs = get_prefs()
         path, _ = QFileDialog.getSaveFileName(
             self, "导出 Excel", prefs.last_dir(), "Excel (*.xlsx)"
@@ -1640,6 +2171,8 @@ class MainWindow(QMainWindow):
 
     def _export_csv_io(self) -> None:
         self._flush_all_channel_tables()
+        if not self._confirm_export_validation():
+            return
         prefs = get_prefs()
         path, _ = QFileDialog.getSaveFileName(
             self, "导出 CSV", prefs.last_dir(), "CSV (*.csv)"
@@ -1663,6 +2196,20 @@ class MainWindow(QMainWindow):
             if not self._confirm_discard():
                 event.ignore()
                 return
+        if hasattr(get_prefs(), "set_startup_preferences") and hasattr(get_prefs(), "startup_preferences"):
+            startup = get_prefs().startup_preferences()
+            if startup.get("remember_window_state", False):
+                get_prefs().set_startup_preferences(
+                    {
+                        "saved_window_rect": [
+                            self.x(),
+                            self.y(),
+                            self.width(),
+                            self.height(),
+                        ]
+                    }
+                )
+        self._capture_project_workspace_state()
         self._autosave_timer.stop()
         self._autosave_recovery_timer.stop()
         clear_autosave()

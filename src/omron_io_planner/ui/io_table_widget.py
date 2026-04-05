@@ -102,6 +102,10 @@ _PAIR_TABLE: list[tuple[str, str]] = [
     ("慢", "快"),
     ("到位", "离位"),
     ("离位", "到位"),
+    ("到位", "原位"),
+    ("原位", "到位"),
+    ("复位", "工作位"),
+    ("工作位", "复位"),
     ("有料", "无料"),
     ("无料", "有料"),
     ("满", "空"),
@@ -152,6 +156,22 @@ def _predict_name(existing_names: list[str], prefix: str) -> str | None:
         if best_suggestion is not None:
             return best_suggestion
     return None
+
+
+def _flip_phrase(text: str) -> str | None:
+    best_suggestion: str | None = None
+    best_score: tuple[int, int, int] | None = None
+    for src, tgt in _PAIR_TABLE:
+        start = text.find(src)
+        while start >= 0:
+            suggestion = text[:start] + tgt + text[start + len(src):]
+            if suggestion != text:
+                score = (1 if start == 0 else 0, len(src), -start)
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_suggestion = suggestion
+            start = text.find(src, start + 1)
+    return best_suggestion
 
 
 def _all_names_in_table(table: "IoTableWidget", col_name: int = 0) -> list[str]:
@@ -418,6 +438,8 @@ _TAIL_TRIGGER_ROWS = 10
 _CELL_BG = "#FFFFFF"
 _CELL_ALT_BG = "#EEF2FF"
 _TEXT_NUMBER_RE = re.compile(r"^(.*?)(\d+)(\D*)$")
+_TEMPLATE_NUMBER_RE = re.compile(r"\{(?:n|num)(?::(\d+))?\}")
+_TEMPLATE_ALT_RE = re.compile(r"\[([^\[\]\|]+)\|([^\[\]\|]+)\]")
 
 
 def _cell_background_color(table: "IoTableWidget | None", row: int | None) -> str:
@@ -474,34 +496,81 @@ def _build_text_fill_values(
         return None
 
     parsed = [_parse_numbered_text(value) for value in values]
-    if any(part is None for part in parsed):
+    if all(part is not None for part in parsed):
+        normalized = [part for part in parsed if part is not None]
+        prefixes = {part[0] for part in normalized}
+        suffixes = {part[2] for part in normalized}
+        if len(prefixes) == 1 and len(suffixes) == 1:
+            prefix = normalized[0][0]
+            suffix = normalized[0][2]
+            width = max(part[3] for part in normalized)
+            numbers = [part[1] for part in normalized]
+
+            step = 1
+            if len(numbers) >= 2:
+                deltas = [numbers[idx] - numbers[idx - 1] for idx in range(1, len(numbers))]
+                nonzero = [delta for delta in deltas if delta != 0]
+                step = nonzero[-1] if nonzero else 1
+
+            if reverse:
+                anchor = numbers[0]
+                sequence = [anchor - step * offset for offset in range(count, 0, -1)]
+            else:
+                anchor = numbers[-1]
+                sequence = [anchor + step * offset for offset in range(1, count + 1)]
+
+            return [f"{prefix}{number:0{width}d}{suffix}" for number in sequence]
+
+    pair_values = _build_pair_fill_values(values, count, reverse=reverse)
+    if pair_values is not None:
+        return pair_values
+    return None
+
+
+def _build_pair_fill_values(
+    source_values: list[str],
+    count: int,
+    *,
+    reverse: bool = False,
+) -> list[str] | None:
+    base = [value.strip() for value in source_values if value and value.strip()]
+    if not base:
         return None
-
-    normalized = [part for part in parsed if part is not None]
-    prefixes = {part[0] for part in normalized}
-    suffixes = {part[2] for part in normalized}
-    if len(prefixes) != 1 or len(suffixes) != 1:
-        return None
-
-    prefix = normalized[0][0]
-    suffix = normalized[0][2]
-    width = max(part[3] for part in normalized)
-    numbers = [part[1] for part in normalized]
-
-    step = 1
-    if len(numbers) >= 2:
-        deltas = [numbers[idx] - numbers[idx - 1] for idx in range(1, len(numbers))]
-        nonzero = [delta for delta in deltas if delta != 0]
-        step = nonzero[-1] if nonzero else 1
-
-    if reverse:
-        anchor = numbers[0]
-        sequence = [anchor - step * offset for offset in range(count, 0, -1)]
+    if len(base) == 1:
+        flipped = _flip_phrase(base[0])
+        if not flipped:
+            return None
+        pattern = [base[0], flipped]
     else:
-        anchor = numbers[-1]
-        sequence = [anchor + step * offset for offset in range(1, count + 1)]
+        first = base[-2]
+        second = base[-1]
+        flipped = _flip_phrase(first)
+        if flipped != second:
+            return None
+        pattern = [first, second]
 
-    return [f"{prefix}{number:0{width}d}{suffix}" for number in sequence]
+    base_len = len(base)
+    if reverse:
+        return [pattern[(base_len - offset - 1) % 2] for offset in range(count, 0, -1)]
+    return [pattern[(base_len + offset) % 2] for offset in range(count)]
+
+
+def _render_generation_template(template: str, index: int, address: str = "") -> str:
+    if not template:
+        return ""
+    rendered = template.replace("{addr}", address)
+
+    def _replace_number(match: re.Match[str]) -> str:
+        width = int(match.group(1) or 0)
+        number = index + 1
+        return f"{number:0{width}d}" if width > 0 else str(number)
+
+    rendered = _TEMPLATE_NUMBER_RE.sub(_replace_number, rendered)
+    rendered = _TEMPLATE_ALT_RE.sub(
+        lambda match: match.group(1) if index % 2 == 0 else match.group(2),
+        rendered,
+    )
+    return rendered
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -545,6 +614,22 @@ class IoTableWidget(QTableWidget):
         super().__init__(0, 6, parent)
         self._undo_stack = QUndoStack(self)
         self._ignore_change = False
+        self._editor_defaults = {
+            "continuous_entry": False,
+            "enter_navigation": "down",
+            "tab_navigation": "right",
+            "auto_increment_address": False,
+            "inherit_data_type": False,
+            "inherit_rack": False,
+            "inherit_usage": False,
+            "auto_increment_name": False,
+            "auto_increment_comment": False,
+            "suggestions_enabled": True,
+            "suggestion_limit": 8,
+            "row_height": 34,
+        }
+        self._name_phrase_library: list[str] = []
+        self._comment_phrase_library: list[str] = []
 
         # 拖拽填充状态
         self._fill_dragging   = False     # 是否正在拖拽填充手柄
@@ -593,6 +678,7 @@ class IoTableWidget(QTableWidget):
         )
         self.setTabKeyNavigation(False)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.verticalHeader().setDefaultSectionSize(int(self._editor_defaults["row_height"]))
 
         # 启用行拖拽排序（阶段四）
         self.setDragEnabled(False)
@@ -614,6 +700,31 @@ class IoTableWidget(QTableWidget):
         self.setColumnWidth(self.COL_RACK,  100)
         self.setColumnWidth(self.COL_USAGE,  78)
         self._ensure_spare_rows()
+
+    def editor_defaults(self) -> dict[str, object]:
+        return dict(self._editor_defaults)
+
+    def set_editor_defaults(self, values: dict[str, object]) -> None:
+        self._editor_defaults.update(values)
+        row_height = int(self._editor_defaults.get("row_height", 34) or 34)
+        self.verticalHeader().setDefaultSectionSize(max(20, row_height))
+
+    def set_phrase_library(self, name_phrases: list[str], comment_phrases: list[str]) -> None:
+        self._name_phrase_library = [phrase.strip() for phrase in name_phrases if phrase and phrase.strip()]
+        self._comment_phrase_library = [phrase.strip() for phrase in comment_phrases if phrase and phrase.strip()]
+
+    def phrase_library_for_column(self, column: int) -> list[str]:
+        if column == self.COL_NAME:
+            return list(self._name_phrase_library)
+        if column == self.COL_COMMENT:
+            return list(self._comment_phrase_library)
+        return []
+
+    def suggestion_limit(self) -> int:
+        return max(1, int(self._editor_defaults.get("suggestion_limit", 8) or 8))
+
+    def suggestions_enabled(self) -> bool:
+        return bool(self._editor_defaults.get("suggestions_enabled", True))
 
     # ── 撤销/重做 ──────────────────────────────────────────────────────────
 
@@ -736,6 +847,115 @@ class IoTableWidget(QTableWidget):
             self.selectRow(insert_at + offset)
         self.setCurrentCell(insert_at, self.currentColumn() if self.currentColumn() >= 0 else self.COL_NAME)
         self._after_batch_change("duplicate_rows", insert_at + len(snapshots) - 1)
+
+    def selected_row_numbers(self) -> list[int]:
+        rows = sorted({index.row() for index in self.selectedIndexes()})
+        if not rows and self.currentIndex().isValid():
+            rows = [self.currentRow()]
+        return rows
+
+    def bulk_update_selected_rows(self, updates: dict[str, str]) -> None:
+        column_map = {
+            "data_type": self.COL_DTYPE,
+            "rack": self.COL_RACK,
+            "usage": self.COL_USAGE,
+        }
+        rows = self.selected_row_numbers()
+        if not rows:
+            return
+        changes: list[tuple[int, int, str, str]] = []
+        for row in rows:
+            for key, value in updates.items():
+                if key not in column_map:
+                    continue
+                col = column_map[key]
+                item = self.item(row, col)
+                old = item.text() if item else ""
+                if old != value:
+                    changes.append((row, col, old, value))
+        if changes:
+            self._undo_stack.push(_MultiCellCommand(self, changes, "批量设置", "bulk_update"))
+
+    def bulk_transform_selection(self, mode: str, value: str = "", start: int = 1) -> None:
+        indices = sorted(
+            {(index.row(), index.column()) for index in self.selectedIndexes()},
+            key=lambda cell: (cell[0], cell[1]),
+        )
+        if not indices and self.currentIndex().isValid():
+            indices = [(self.currentRow(), self.currentColumn())]
+        if not indices:
+            return
+        changes: list[tuple[int, int, str, str]] = []
+        counter = start
+        for row, col in indices:
+            item = self.item(row, col)
+            old = item.text() if item else ""
+            if not old:
+                continue
+            if mode == "prefix":
+                new = f"{value}{old}"
+            elif mode == "suffix":
+                new = f"{old}{value}"
+            elif mode == "number":
+                new = f"{old}{counter}"
+                counter += 1
+            else:
+                continue
+            if old != new:
+                changes.append((row, col, old, new))
+        if changes:
+            self._undo_stack.push(_MultiCellCommand(self, changes, "批量文本处理", "bulk_transform"))
+
+    def apply_multi_changes(self, changes: list[tuple[int, int, str, str]], description: str, reason: str) -> None:
+        if changes:
+            self._undo_stack.push(_MultiCellCommand(self, changes, description, reason))
+
+    def layout_state(self) -> dict[str, object]:
+        header = self.horizontalHeader()
+        widths = [self.columnWidth(col) for col in range(self.columnCount())]
+        visual_order = [header.visualIndex(col) for col in range(self.columnCount())]
+        hidden = [self.isColumnHidden(col) for col in range(self.columnCount())]
+        state: dict[str, object] = {
+            "widths": widths,
+            "visual_order": visual_order,
+            "hidden": hidden,
+        }
+        if self._addr_sort_order is not None:
+            state["sort"] = {
+                "column": self.COL_ADDR,
+                "order": "desc" if self._addr_sort_order == Qt.SortOrder.DescendingOrder else "asc",
+            }
+        return state
+
+    def apply_layout_state(self, state: dict[str, object]) -> None:
+        if not state:
+            return
+        widths = state.get("widths")
+        if isinstance(widths, list):
+            for col, width in enumerate(widths[: self.columnCount()]):
+                self.setColumnWidth(col, int(width))
+        hidden = state.get("hidden")
+        if isinstance(hidden, list):
+            for col, is_hidden in enumerate(hidden[: self.columnCount()]):
+                self.setColumnHidden(col, bool(is_hidden))
+        visual_order = state.get("visual_order")
+        if isinstance(visual_order, list) and len(visual_order) == self.columnCount():
+            header = self.horizontalHeader()
+            target_positions = {logical: int(position) for logical, position in enumerate(visual_order)}
+            for target_visual in range(self.columnCount()):
+                logical = next(
+                    (logical_index for logical_index, pos in target_positions.items() if pos == target_visual),
+                    None,
+                )
+                if logical is None:
+                    continue
+                current_visual = header.visualIndex(logical)
+                if current_visual != target_visual:
+                    header.moveSection(current_visual, target_visual)
+        sort_state = state.get("sort")
+        if isinstance(sort_state, dict) and int(sort_state.get("column", -1)) == self.COL_ADDR:
+            order = Qt.SortOrder.DescendingOrder if sort_state.get("order") == "desc" else Qt.SortOrder.AscendingOrder
+            self._sort_rows_by_address(order)
 
     def _sort_rows_by_address(self, order: Qt.SortOrder) -> None:
         row_snapshots = [self._snapshot_row_data(row) for row in range(self.rowCount())]
@@ -1379,10 +1599,20 @@ class IoTableWidget(QTableWidget):
             self._clear_selection(); return
 
         if key == Qt.Key.Key_Tab:
-            self._navigate(0, -1 if shift else 1); return
+            tab_navigation = str(self._editor_defaults.get("tab_navigation", "right"))
+            if tab_navigation == "down":
+                self._navigate(-1 if shift else 1, 0)
+            else:
+                self._navigate(0, -1 if shift else 1)
+            return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.isPersistentEditorOpen(self.currentIndex()):
-                self._navigate(-1 if shift else 1, 0); return
+                enter_navigation = str(self._editor_defaults.get("enter_navigation", "down"))
+                if enter_navigation == "right":
+                    self._navigate(0, -1 if shift else 1)
+                else:
+                    self._navigate(-1 if shift else 1, 0)
+                return
 
         super().keyPressEvent(event)
 
@@ -1423,9 +1653,57 @@ class IoTableWidget(QTableWidget):
         r = max(0, min(r, self.rowCount() - 1))
         c = max(0, min(c, self.columnCount() - 1))
 
+        if (
+            bool(self._editor_defaults.get("continuous_entry"))
+            and r > idx.row()
+        ):
+            self._seed_row_from_previous(idx.row(), r)
+
         self._ensure_spare_rows(r)
         self.setCurrentCell(r, c)
         self.scrollTo(self.model().index(r, c))
+
+    def _seed_row_from_previous(self, source_row: int, target_row: int) -> None:
+        if target_row <= source_row:
+            return
+        self._ensure_row_available(target_row)
+        changes: list[tuple[int, int, str, str]] = []
+
+        def _current_text(row: int, col: int) -> str:
+            item = self.item(row, col)
+            return item.text() if item else ""
+
+        def _queue_if_blank(col: int, new_value: str) -> None:
+            if not new_value:
+                return
+            old = _current_text(target_row, col)
+            if old:
+                return
+            changes.append((target_row, col, old, new_value))
+
+        if bool(self._editor_defaults.get("inherit_data_type")):
+            _queue_if_blank(self.COL_DTYPE, _current_text(source_row, self.COL_DTYPE))
+        if bool(self._editor_defaults.get("inherit_rack")):
+            _queue_if_blank(self.COL_RACK, _current_text(source_row, self.COL_RACK))
+        if bool(self._editor_defaults.get("inherit_usage")):
+            _queue_if_blank(self.COL_USAGE, _current_text(source_row, self.COL_USAGE))
+        if bool(self._editor_defaults.get("auto_increment_address")):
+            source_address = _current_text(source_row, self.COL_ADDR)
+            next_address = _next_omron_bit(source_address) if source_address else None
+            if next_address:
+                _queue_if_blank(self.COL_ADDR, next_address)
+        if bool(self._editor_defaults.get("auto_increment_name")):
+            source_name = _current_text(source_row, self.COL_NAME)
+            next_names = _build_text_fill_values([source_name], 1) if source_name else None
+            if next_names:
+                _queue_if_blank(self.COL_NAME, next_names[0])
+        if bool(self._editor_defaults.get("auto_increment_comment")):
+            source_comment = _current_text(source_row, self.COL_COMMENT)
+            next_comments = _build_text_fill_values([source_comment], 1) if source_comment else None
+            if next_comments:
+                _queue_if_blank(self.COL_COMMENT, next_comments[0])
+        if changes:
+            self._undo_stack.push(_MultiCellCommand(self, changes, "连续录入补全", "continuous_entry"))
 
     # ── 复制 / 粘贴 / 清除 ────────────────────────────────────────────────
 

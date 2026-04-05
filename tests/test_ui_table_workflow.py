@@ -952,3 +952,146 @@ def test_channel_shortcut_hint_matches_current_shortcuts(qtbot, monkeypatch) -> 
     assert hints
     assert "方向键选择建议" in hints[0]
     assert "Tab 键接受建议" not in hints[0]
+
+
+def test_continuous_entry_seeds_next_row_from_previous_values(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 3)
+    table.set_editor_defaults(
+        {
+            "continuous_entry": True,
+            "auto_increment_address": True,
+            "inherit_data_type": True,
+            "inherit_rack": True,
+            "inherit_usage": True,
+            "auto_increment_name": True,
+            "auto_increment_comment": True,
+        }
+    )
+    table.item(0, table.COL_NAME).setText("X01")
+    table.item(0, table.COL_DTYPE).setText("BOOL")
+    table.item(0, table.COL_ADDR).setText("0.00")
+    table.item(0, table.COL_COMMENT).setText("阻挡气缸伸出1")
+    table.item(0, table.COL_RACK).setText("R1")
+    table.item(0, table.COL_USAGE).setText("输入")
+    table.setCurrentCell(0, table.COL_NAME)
+
+    table._navigate(1, 0)
+
+    assert table.item(1, table.COL_NAME).text() == "X02"
+    assert table.item(1, table.COL_ADDR).text() == "0.01"
+    assert table.item(1, table.COL_COMMENT).text() == "阻挡气缸伸出2"
+    assert table.item(1, table.COL_DTYPE).text() == "BOOL"
+    assert table.item(1, table.COL_RACK).text() == "R1"
+    assert table.item(1, table.COL_USAGE).text() == "输入"
+
+
+def test_batch_generate_rows_creates_address_sequence_and_updates_project(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+
+    window._apply_batch_generate(
+        table,
+        {
+            "start_address": "0.10",
+            "row_count": 3,
+            "data_type": "BOOL",
+            "name_template": "X{n:02}",
+            "comment_template": "阻挡气缸[伸出|缩回]到位",
+            "rack": "R2",
+            "usage": "输出",
+        },
+    )
+
+    assert table.item(0, table.COL_NAME).text() == "X01"
+    assert table.item(1, table.COL_NAME).text() == "X02"
+    assert table.item(0, table.COL_ADDR).text() == "0.10"
+    assert table.item(2, table.COL_ADDR).text() == "0.12"
+    assert table.item(0, table.COL_COMMENT).text() == "阻挡气缸伸出到位"
+    assert table.item(1, table.COL_COMMENT).text() == "阻挡气缸缩回到位"
+    assert window._project.channels[0].points[2].usage == "输出"
+
+
+def test_bulk_row_update_and_text_transform_apply_to_selection(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 3)
+    table.item(0, table.COL_NAME).setText("S1")
+    table.item(1, table.COL_NAME).setText("S2")
+    table.item(0, table.COL_COMMENT).setText("顶升")
+    table.item(1, table.COL_COMMENT).setText("阻挡")
+    table.setCurrentCell(0, 0)
+    table.setRangeSelected(QTableWidgetSelectionRange(0, 0, 1, table.columnCount() - 1), True)
+
+    table.bulk_update_selected_rows({"data_type": "INT", "rack": "R5", "usage": "输出"})
+
+    table.clearSelection()
+    table.setRangeSelected(QTableWidgetSelectionRange(0, table.COL_COMMENT, 1, table.COL_COMMENT), True)
+    table.bulk_transform_selection("prefix", "前缀-")
+
+    assert table.item(0, table.COL_DTYPE).text() == "INT"
+    assert table.item(1, table.COL_RACK).text() == "R5"
+    assert table.item(0, table.COL_USAGE).text() == "输出"
+    assert table.item(0, table.COL_COMMENT).text() == "前缀-顶升"
+    assert table.item(1, table.COL_COMMENT).text() == "前缀-阻挡"
+
+
+def test_comment_delegate_includes_phrase_library_suggestions(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 2)
+    table.set_phrase_library([], ["阻挡气缸缩回到位", "阻挡气缸伸出到位"])
+    delegate = NameCompleterDelegate(table, table, source_column=table.COL_COMMENT)
+
+    suggestions = delegate._suggestions_for_text("阻挡气缸")
+
+    assert suggestions[:2] == ["阻挡气缸伸出到位", "阻挡气缸缩回到位"]
+
+
+def test_workspace_state_restores_preview_order_filters_and_immersive_mode(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project.workspace_state = {
+        "active_tab": "WR 区",
+        "preview_order": ["WR 区", "CIO 区"],
+        "preview_checked": ["WR 区"],
+        "immersive_mode": True,
+        "filters": {"WR 区": {"query": "缩回", "filled_only": True}},
+        "table_layout": {"widths": [72, 98, 104, 480, 110, 84]},
+    }
+    window._project.channels = [
+        IoChannel("CIO 区", [IoPoint(name="A", data_type="BOOL", address="0.00", comment="")], zone_id="CIO"),
+        IoChannel("WR 区", [IoPoint(name="B", data_type="BOOL", address="100.00", comment="缩回")], zone_id="WR"),
+    ]
+    window._channel_tables.clear()
+    window._rebuild_tabs(select_index=1)
+
+    assert window._tabs.currentIndex() == 2
+    assert window._immersive_mode is True
+    assert window._preview_list.item(0).text() == "WR 区"
+    assert window._preview_list.item(0).checkState() == Qt.CheckState.Checked
+    assert window._preview_list.item(1).checkState() == Qt.CheckState.Unchecked
+    table = window._channel_tables[1]
+    assert window._editor_filter_edits[table].text() == "缩回"
+    assert window._editor_filled_toggles[table].isChecked() is True
+    assert table.columnWidth(table.COL_ADDR) == 104
+
+
+def test_validation_collects_core_issues(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("CIO 区", [IoPoint(name="", data_type="BOOL", address="0.00", comment="")], zone_id="CIO"),
+            IoChannel("WR 区", [IoPoint(name="A", data_type="UNKNOWN", address="0.00", comment="")], zone_id="WR"),
+        ],
+    )
+    window._channel_tables.clear()
+    window._rebuild_tabs(select_index=0)
+    for index in range(window._preview_list.count()):
+        window._preview_list.item(index).setCheckState(Qt.CheckState.Unchecked)
+
+    issues = window._collect_validation_issues()
+
+    codes = {issue["code"] for issue in issues}
+    assert {"duplicate_address", "missing_name", "invalid_data_type", "empty_preview"} <= codes

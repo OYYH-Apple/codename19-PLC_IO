@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .omron_symbol_types import normalize_data_type
 
@@ -37,6 +37,8 @@ class IoProject:
     name: str = "新项目"
     plc_prefix: str = "PLC"
     channels: List[IoChannel] = field(default_factory=list)
+    workspace_state: dict[str, Any] = field(default_factory=dict)
+    project_preferences: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.channels:

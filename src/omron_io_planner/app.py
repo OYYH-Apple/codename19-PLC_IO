@@ -6,6 +6,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from .project_manager import get_prefs
 from .ui.main_window import MainWindow
 
 
@@ -17,7 +18,17 @@ def main() -> None:
     app.setApplicationName("欧姆龙 IO 分配助手")
     w = MainWindow()
     screen = app.primaryScreen()
-    if screen is not None:
+    prefs = get_prefs()
+    startup = prefs.startup_preferences() if hasattr(prefs, "startup_preferences") else {}
+    saved_rect = startup.get("saved_window_rect", []) if isinstance(startup, dict) else []
+    if (
+        bool(startup.get("remember_window_state", False))
+        and isinstance(saved_rect, list)
+        and len(saved_rect) == 4
+    ):
+        w.resize(int(saved_rect[2]), int(saved_rect[3]))
+        w.move(int(saved_rect[0]), int(saved_rect[1]))
+    elif screen is not None:
         available = screen.availableGeometry()
         width = round(available.width() * _STARTUP_RATIO[0])
         height = round(available.height() * _STARTUP_RATIO[1])

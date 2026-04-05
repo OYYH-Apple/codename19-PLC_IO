@@ -42,12 +42,16 @@ def project_from_dict(d: Dict[str, Any]) -> IoProject:
             name=d.get("name", "未命名"),
             plc_prefix=d.get("plc_prefix", "PLC"),
             channels=chs,
+            workspace_state=dict(d.get("workspace_state") or {}),
+            project_preferences=dict(d.get("project_preferences") or {}),
         )
     pts = [_point_from_dict(x) for x in d.get("points", [])]
     return IoProject(
         name=d.get("name", "未命名"),
         plc_prefix=d.get("plc_prefix", "PLC"),
         channels=[IoChannel(name="导入数据", zone_id="", points=pts)],
+        workspace_state=dict(d.get("workspace_state") or {}),
+        project_preferences=dict(d.get("project_preferences") or {}),
     )
 
 
@@ -68,6 +72,8 @@ def save_project_json(project: IoProject, path: str | Path) -> None:
         "name": project.name,
         "plc_prefix": project.plc_prefix,
         "channels": [_channel_to_dict(c) for c in project.channels],
+        "workspace_state": project.workspace_state,
+        "project_preferences": project.project_preferences,
     }
     path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
 

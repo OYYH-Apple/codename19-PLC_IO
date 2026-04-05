@@ -127,8 +127,11 @@ class NameCompleterDelegate(QStyledItemDelegate):
         text = text.strip()
         if not text:
             return []
+        if not self._table.suggestions_enabled():
+            return []
 
         all_names = _all_names_in_table(self._table, self._source_column)
+        phrase_library = self._table.phrase_library_for_column(self._source_column)
         suggestions: list[str] = []
         seen: set[str] = set()
 
@@ -136,6 +139,18 @@ class NameCompleterDelegate(QStyledItemDelegate):
         if predicted:
             suggestions.append(predicted)
             seen.add(predicted)
+
+        for candidate in reversed(phrase_library):
+            candidate = candidate.strip()
+            if (
+                not candidate
+                or candidate == text
+                or candidate in seen
+                or not candidate.startswith(text)
+            ):
+                continue
+            suggestions.append(candidate)
+            seen.add(candidate)
 
         for candidate in reversed(all_names):
             candidate = candidate.strip()
@@ -149,7 +164,7 @@ class NameCompleterDelegate(QStyledItemDelegate):
             suggestions.append(candidate)
             seen.add(candidate)
 
-        return suggestions
+        return suggestions[: self._table.suggestion_limit()]
 
     def _update_suggestion(self, edit: QLineEdit, text: str) -> None:
         completer = edit.completer()
