@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
-"""数据类型列：下拉 + 可编辑，选项来自 omron_symbol_types（与 CX-Programmer 常见类型名对齐）。"""
+"""数据类型列：受控下拉选择，选项来自 omron_symbol_types。"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize, QRectF, QPoint
 from PySide6.QtGui import QPolygonF, QPainter, QPen, QBrush, QColor, QAction
-from PySide6.QtWidgets import QComboBox, QStyledItemDelegate, QStyle, QStyleOptionViewItem, QMenu
+from PySide6.QtWidgets import (
+    QAbstractItemDelegate,
+    QAbstractItemView,
+    QComboBox,
+    QMenu,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
+)
 
 from ..omron_symbol_types import combo_items
-from .io_table_widget import IoTableWidget, _cell_background_color, _inline_line_edit_stylesheet
+from .io_table_widget import IoTableWidget, _cell_background_color
 
 
 class DataTypeDelegate(QStyledItemDelegate):
@@ -19,8 +27,9 @@ class DataTypeDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):  # noqa: ANN001
         cb = QComboBox(parent)
         cb.addItems(self._items)
-        cb.setEditable(True)
+        cb.setEditable(False)
         cb.setFrame(False)
+        cb.setProperty("_setting_editor_data", False)
         background = _cell_background_color(self.parent() if isinstance(self.parent(), IoTableWidget) else None, index.row())
         cb.setStyleSheet(
             "QComboBox {"
@@ -44,10 +53,7 @@ class DataTypeDelegate(QStyledItemDelegate):
             " border: 1px solid #C8CDD8;"
             "}"
         )
-        if cb.lineEdit() is not None:
-            cb.lineEdit().setFrame(False)
-            cb.lineEdit().setAutoFillBackground(True)
-            cb.lineEdit().setStyleSheet(_inline_line_edit_stylesheet(background))
+        cb.currentIndexChanged.connect(lambda _idx, editor=cb: self._commit_and_close(editor))
         return cb
 
     def setEditorData(self, editor, index) -> None:  # noqa: ANN001
@@ -56,16 +62,31 @@ class DataTypeDelegate(QStyledItemDelegate):
         t = index.data(Qt.ItemDataRole.DisplayRole)
         text = (str(t) if t is not None else "").strip() or "BOOL"
         u = text.upper()
-        found = -1
-        for j in range(editor.count()):
-            if editor.itemText(j).upper() == u:
-                found = j
-                break
-        if found >= 0:
-            editor.setCurrentIndex(found)
-        else:
-            editor.setCurrentIndex(-1)
-            editor.setEditText(text)
+        editor.setProperty("_setting_editor_data", True)
+        editor.blockSignals(True)
+        try:
+            self._remove_custom_item(editor)
+            found = -1
+            for j in range(editor.count()):
+                if editor.itemText(j).upper() == u:
+                    found = j
+                    break
+            if found >= 0:
+                editor.setCurrentIndex(found)
+            else:
+                editor.addItem(text)
+                custom_index = editor.count() - 1
+                editor.setProperty("_custom_item_index", custom_index)
+                editor.setCurrentIndex(custom_index)
+        finally:
+            editor.blockSignals(False)
+            editor.setProperty("_setting_editor_data", False)
+
+    def _remove_custom_item(self, editor: QComboBox) -> None:
+        custom_index = editor.property("_custom_item_index")
+        if isinstance(custom_index, int) and 0 <= custom_index < editor.count():
+            editor.removeItem(custom_index)
+        editor.setProperty("_custom_item_index", -1)
 
     def setModelData(self, editor, model, index) -> None:  # noqa: ANN001
         if isinstance(editor, QComboBox):
@@ -75,6 +96,18 @@ class DataTypeDelegate(QStyledItemDelegate):
                 table.commit_editor_text(index.row(), index.column(), text)
                 return
             model.setData(index, text, Qt.ItemDataRole.EditRole)
+
+    def _commit_and_close(self, editor: QComboBox) -> None:
+        if editor.property("_setting_editor_data"):
+            return
+        table = self.parent()
+        if isinstance(table, IoTableWidget):
+            if table.state() != QAbstractItemView.State.EditingState:
+                return
+            if editor.parentWidget() is not table.viewport():
+                return
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
 
     def paint(self, painter, option, index):  # noqa: ANN001
         """绘制单元格文本和下拉箭头图标"""

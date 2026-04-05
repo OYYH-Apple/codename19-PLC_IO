@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, qInstallMessageHandler
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QAbstractItemDelegate,
+    QComboBox,
     QLineEdit,
+    QLabel,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QTableWidgetItem,
     QTableWidgetSelectionRange,
+    QToolButton,
 )
 
 from omron_io_planner.export import rows_io_table_channel
@@ -21,6 +25,7 @@ from omron_io_planner.ui.io_table_widget import IoTableWidget
 from omron_io_planner.ui.main_window import MainWindow
 from omron_io_planner.ui.name_completer_delegate import NameCompleterDelegate
 from omron_io_planner.ui.style import app_stylesheet
+from omron_io_planner.ui.zone_info_panel import ZoneInfoPanel
 from omron_io_planner.ui.zone_picker_dialog import ZonePickerDialog
 
 
@@ -33,8 +38,68 @@ def _fill_table(table: IoTableWidget, rows: int, cols: int = 6) -> None:
                 table.setItem(row, col, QTableWidgetItem(""))
 
 
-def _make_window(qtbot, monkeypatch) -> MainWindow:
+def _recent_item_widget_text(window: MainWindow, index: int) -> str:
+    item = window._recent_projects_list.item(index)
+    widget = window._recent_projects_list.itemWidget(item)
+    title = widget.findChild(QLabel, "recentProjectItemTitle")
+    path = widget.findChild(QLabel, "recentProjectItemPath")
+    meta = widget.findChild(QLabel, "recentProjectItemMeta")
+    return " ".join(
+        part
+        for part in (
+            title.text() if title is not None else "",
+            path.text() if path is not None else "",
+            meta.text() if meta is not None else "",
+        )
+        if part
+    )
+
+
+def _make_window(qtbot, monkeypatch, prefs=None) -> MainWindow:
     monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
+    class _TestPrefs:
+        def startup_preferences(self) -> dict[str, object]:
+            return {
+                "remember_window_state": False,
+                "saved_window_rect": [],
+                "auto_open_recent": False,
+                "show_recent_sidebar": True,
+            }
+
+        def recent_workspace_preferences(self) -> dict[str, object]:
+            return {"auto_prune_missing": False, "allow_pinned": True}
+
+        def editor_defaults(self) -> dict[str, object]:
+            return {}
+
+        def recent_files(self) -> list[str]:
+            return []
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def clear_recent(self) -> None:
+            pass
+
+        def last_dir(self) -> str:
+            return ""
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    monkeypatch.setattr("omron_io_planner.ui.main_window.get_prefs", lambda: prefs or _TestPrefs())
     window = MainWindow()
     window._confirm_discard = lambda: True
     window._autosave_timer.stop()
@@ -141,6 +206,32 @@ def test_single_cell_edit_uses_undo_redo(qtbot) -> None:
     assert table.item(0, table.COL_NAME).text() == "value"
 
 
+def test_insert_row_uses_undo_redo(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    table.item(0, table.COL_NAME).setText("row0")
+    table.item(1, table.COL_NAME).setText("row1")
+    table.setCurrentCell(0, table.COL_NAME)
+    initial_rows = table.rowCount()
+
+    table._insert_row(below=True)
+
+    assert table.rowCount() == initial_rows + 1
+    assert table.item(1, table.COL_NAME).text() == ""
+    assert table.item(2, table.COL_NAME).text() == "row1"
+
+    table.undo()
+
+    assert table.rowCount() == initial_rows
+    assert table.item(1, table.COL_NAME).text() == "row1"
+
+    table.redo()
+
+    assert table.rowCount() == initial_rows + 1
+    assert table.item(1, table.COL_NAME).text() == ""
+    assert table.item(2, table.COL_NAME).text() == "row1"
+
+
 def test_duplicate_selected_rows_copies_row_content(qtbot) -> None:
     table = IoTableWidget()
     qtbot.addWidget(table)
@@ -153,6 +244,52 @@ def test_duplicate_selected_rows_copies_row_content(qtbot) -> None:
 
     assert table.item(1, table.COL_NAME).text() == "sensor_a"
     assert table.item(1, table.COL_ADDR).text() == "0.00"
+
+
+def test_duplicate_selected_rows_uses_undo_redo(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    table.item(0, table.COL_NAME).setText("row0")
+    table.item(1, table.COL_NAME).setText("row1")
+    table.selectRow(0)
+
+    table.duplicate_selected_rows()
+
+    assert table.item(0, table.COL_NAME).text() == "row0"
+    assert table.item(1, table.COL_NAME).text() == "row0"
+    assert table.item(2, table.COL_NAME).text() == "row1"
+
+    table.undo()
+
+    assert table.item(0, table.COL_NAME).text() == "row0"
+    assert table.item(1, table.COL_NAME).text() == "row1"
+
+    table.redo()
+
+    assert table.item(0, table.COL_NAME).text() == "row0"
+    assert table.item(1, table.COL_NAME).text() == "row0"
+    assert table.item(2, table.COL_NAME).text() == "row1"
+
+
+def test_delete_selected_rows_uses_undo_redo(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    table.item(0, table.COL_NAME).setText("row0")
+    table.item(1, table.COL_NAME).setText("row1")
+    table.selectRow(0)
+
+    table._delete_selected_rows()
+
+    assert table.item(0, table.COL_NAME).text() == "row1"
+
+    table.undo()
+
+    assert table.item(0, table.COL_NAME).text() == "row0"
+    assert table.item(1, table.COL_NAME).text() == "row1"
+
+    table.redo()
+
+    assert table.item(0, table.COL_NAME).text() == "row1"
 
 
 def test_fill_down_increments_trailing_numbers(qtbot) -> None:
@@ -211,6 +348,58 @@ def test_tab_and_enter_shortcuts_navigate_cells(qtbot) -> None:
 
     qtbot.keyClick(table, Qt.Key.Key_Return)
     assert (table.currentRow(), table.currentColumn()) == (1, table.COL_DTYPE)
+
+
+def test_ctrl_arrow_shortcut_jumps_to_edge_without_extending_selection(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    for column, text in ((table.COL_DTYPE, "BOOL"), (table.COL_ADDR, "0.00"), (table.COL_COMMENT, "说明")):
+        table.item(1, column).setText(text)
+    table.show()
+    table.setCurrentCell(1, table.COL_DTYPE)
+    table.setFocus()
+
+    qtbot.keyClick(table, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+
+    assert (table.currentRow(), table.currentColumn()) == (1, table.COL_COMMENT)
+    assert [(index.row(), index.column()) for index in table.selectedIndexes()] == [(1, table.COL_COMMENT)]
+
+
+def test_ctrl_shift_arrow_shortcut_extends_selection_to_data_edge(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    for column, text in ((table.COL_DTYPE, "BOOL"), (table.COL_ADDR, "0.00"), (table.COL_COMMENT, "说明")):
+        table.item(1, column).setText(text)
+    table.show()
+    table.setCurrentCell(1, table.COL_DTYPE)
+    table.setFocus()
+
+    qtbot.keyClick(table, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+
+    assert (table.currentRow(), table.currentColumn()) == (1, table.COL_COMMENT)
+    assert [(index.row(), index.column()) for index in table.selectedIndexes()] == [
+        (1, table.COL_DTYPE),
+        (1, table.COL_ADDR),
+        (1, table.COL_COMMENT),
+    ]
+
+
+def test_ctrl_end_shortcut_jumps_to_last_used_cell(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 6)
+    table.item(2, table.COL_USAGE).setText("辅助")
+    table.item(4, table.COL_ADDR).setText("10.00")
+    table.show()
+    table.setCurrentCell(0, table.COL_NAME)
+    table.setFocus()
+
+    qtbot.keyClick(table, Qt.Key.Key_End, Qt.KeyboardModifier.ControlModifier)
+
+    assert (table.currentRow(), table.currentColumn()) == (4, table.COL_ADDR)
+    assert [(index.row(), index.column()) for index in table.selectedIndexes()] == [(4, table.COL_ADDR)]
 
 
 def test_main_window_updates_project_immediately_after_table_change(qtbot, monkeypatch) -> None:
@@ -428,7 +617,8 @@ def test_recent_projects_sidebar_lists_and_opens_recent_files(qtbot, monkeypatch
 
     assert window._recent_projects_list is not None
     assert window._recent_projects_list.count() == 2
-    assert window._recent_projects_list.item(0).text().startswith(project_a.name)
+    assert window._recent_projects_list.item(0).text() == ""
+    assert project_a.name in _recent_item_widget_text(window, 0)
 
     item_rect = window._recent_projects_list.visualItemRect(window._recent_projects_list.item(1))
     qtbot.mouseClick(window._recent_projects_list.viewport(), Qt.MouseButton.LeftButton, pos=item_rect.center())
@@ -473,6 +663,8 @@ def test_recent_project_click_and_activation_do_not_double_open(qtbot, monkeypat
 
     monkeypatch.setattr("omron_io_planner.ui.main_window.get_prefs", lambda: _FakePrefs())
     monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
+    times = iter((100.0, 100.7))
+    monkeypatch.setattr("omron_io_planner.ui.main_window.time.monotonic", lambda: next(times))
     window = MainWindow()
     opened: list[str] = []
     window._confirm_discard = lambda: True
@@ -560,7 +752,7 @@ def test_recent_projects_sidebar_filters_items(qtbot, monkeypatch, tmp_path) -> 
     QApplication.processEvents()
 
     visible = [
-        window._recent_projects_list.item(index).text()
+        _recent_item_widget_text(window, index)
         for index in range(window._recent_projects_list.count())
         if not window._recent_projects_list.item(index).isHidden()
     ]
@@ -613,16 +805,91 @@ def test_recent_projects_sidebar_remove_button_updates_list(qtbot, monkeypatch, 
     monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
     window = MainWindow()
     window._confirm_discard = lambda: True
+    window._dialog_message = lambda *args, **kwargs: "移除"  # type: ignore[method-assign]
     window._autosave_timer.stop()
     qtbot.addWidget(window)
     window.show()
     QApplication.processEvents()
 
     window._recent_projects_list.setCurrentRow(0)
-    qtbot.mouseClick(window._recent_remove_btn, Qt.MouseButton.LeftButton)
+    item = window._recent_projects_list.currentItem()
+    assert item is not None
+    widget = window._recent_projects_list.itemWidget(item)
+    assert widget is not None
+    remove_button = next(
+        button
+        for button in widget.findChildren(QToolButton)
+        if button.toolTip() == "移除最近项目"
+    )
+    qtbot.mouseClick(remove_button, Qt.MouseButton.LeftButton)
 
     assert window._recent_projects_list.count() == 1
-    assert "beta" in window._recent_projects_list.item(0).text().lower()
+    assert "beta" in _recent_item_widget_text(window, 0).lower()
+
+
+def test_recent_projects_remove_button_respects_cancel(qtbot, monkeypatch, tmp_path) -> None:
+    project_a = tmp_path / "alpha.json"
+    project_a.write_text("{}", encoding="utf-8")
+
+    class _FakePrefs:
+        def __init__(self) -> None:
+            self.paths = [str(project_a)]
+
+        def recent_files(self) -> list[str]:
+            return list(self.paths)
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            self.paths = [value for value in self.paths if value != path]
+
+        def clear_recent(self) -> None:
+            self.paths = []
+
+        def last_dir(self) -> str:
+            return str(tmp_path)
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def recent_limit(self) -> int:
+            return 10
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    prefs = _FakePrefs()
+    monkeypatch.setattr("omron_io_planner.ui.main_window.get_prefs", lambda: prefs)
+    monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
+    window = MainWindow()
+    window._confirm_discard = lambda: True
+    window._dialog_message = lambda *args, **kwargs: "取消"  # type: ignore[method-assign]
+    window._autosave_timer.stop()
+    qtbot.addWidget(window)
+    window.show()
+    QApplication.processEvents()
+
+    item = window._recent_projects_list.item(0)
+    assert item is not None
+    widget = window._recent_projects_list.itemWidget(item)
+    assert widget is not None
+    remove_button = next(
+        button
+        for button in widget.findChildren(QToolButton)
+        if button.toolTip() == "移除最近项目"
+    )
+
+    qtbot.mouseClick(remove_button, Qt.MouseButton.LeftButton)
+
+    assert window._recent_projects_list.count() == 1
+    assert prefs.paths == [str(project_a)]
 
 
 def test_preview_sidebar_action_buttons_have_uniform_width(qtbot, monkeypatch) -> None:
@@ -640,20 +907,79 @@ def test_preview_sidebar_action_buttons_have_uniform_width(qtbot, monkeypatch) -
 
 
 def test_sidebar_action_buttons_fit_within_available_width(qtbot, monkeypatch) -> None:
-    window = _make_window(qtbot, monkeypatch)
+    class _RecentPrefs:
+        def startup_preferences(self) -> dict[str, object]:
+            return {
+                "remember_window_state": False,
+                "saved_window_rect": [],
+                "auto_open_recent": False,
+                "show_recent_sidebar": True,
+            }
+
+        def recent_workspace_preferences(self) -> dict[str, object]:
+            return {"auto_prune_missing": False, "allow_pinned": True}
+
+        def editor_defaults(self) -> dict[str, object]:
+            return {}
+
+        def recent_files(self) -> list[str]:
+            return ["C:/tmp/recent-a.json"]
+
+        def recent_projects(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "path": "C:/tmp/recent-a.json",
+                    "pinned": False,
+                    "last_opened": 0.0,
+                    "last_saved": 0.0,
+                }
+            ]
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def clear_recent(self) -> None:
+            pass
+
+        def last_dir(self) -> str:
+            return ""
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    window = _make_window(qtbot, monkeypatch, prefs=_RecentPrefs())
     window.resize(1280, 820)
     window.show()
     window._tabs.setCurrentIndex(0)
     QApplication.processEvents()
 
-    recent_buttons = [window._recent_open_btn, window._recent_remove_btn, window._recent_clean_btn]
+    recent_item = window._recent_projects_list.item(0)
+    assert recent_item is not None
+    recent_widget = window._recent_projects_list.itemWidget(recent_item)
+    assert recent_widget is not None
+    recent_buttons = recent_widget.findChildren(QToolButton)
+    path_label = recent_widget.findChild(QLabel, "recentProjectItemPath")
+    meta_label = recent_widget.findChild(QLabel, "recentProjectItemMeta")
+    clean_button = window._recent_clean_btn
     preview_buttons = window._preview_actions.findChildren(
         QPushButton,
         options=Qt.FindChildOption.FindDirectChildrenOnly,
     )
 
     rows = [
-        (window._recent_open_btn.parentWidget(), recent_buttons),
+        (recent_widget, recent_buttons),
         (window._preview_actions, preview_buttons),
     ]
     for parent, buttons in rows:
@@ -662,6 +988,175 @@ def test_sidebar_action_buttons_fit_within_available_width(qtbot, monkeypatch) -
         contents = parent.contentsRect()
         assert min(button.geometry().left() for button in buttons) >= contents.left()
         assert max(button.geometry().right() for button in buttons) <= contents.right()
+
+    assert isinstance(clean_button, QToolButton)
+    assert clean_button.parentWidget().objectName() == "recentProjectsFilterRow"
+    assert len(recent_buttons) == 2
+    assert all(button.width() <= 32 for button in recent_buttons)
+    assert path_label is not None and path_label.text()
+    assert meta_label is not None and meta_label.isVisible() and meta_label.text()
+    assert recent_item.background().style() == Qt.BrushStyle.NoBrush
+    assert recent_item.sizeHint().height() >= 88
+
+
+def test_copy_group_is_embedded_in_project_meta_group(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+
+    assert window._copy_group is not None
+    assert window._project_meta_group is not None
+    assert window._project_meta_group.isAncestorOf(window._copy_group)
+
+
+def test_channel_management_buttons_live_in_tab_corner_widget(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+
+    assert window._tabs is not None
+    corner = window._tabs.cornerWidget(Qt.Corner.TopRightCorner)
+
+    assert corner is not None
+    assert corner.isAncestorOf(window._btn_add_ch)
+    assert corner.isAncestorOf(window._btn_del_ch)
+    assert not window._project_meta_group.isAncestorOf(window._btn_add_ch)
+    assert not window._project_meta_group.isAncestorOf(window._btn_del_ch)
+
+
+def test_recent_project_card_shows_meta_state_and_roomier_item_height(qtbot, monkeypatch, tmp_path) -> None:
+    project_a = tmp_path / "alpha.json"
+    project_a.write_text("{}", encoding="utf-8")
+
+    class _RecentPrefs:
+        def startup_preferences(self) -> dict[str, object]:
+            return {
+                "remember_window_state": False,
+                "saved_window_rect": [],
+                "auto_open_recent": False,
+                "show_recent_sidebar": True,
+            }
+
+        def recent_workspace_preferences(self) -> dict[str, object]:
+            return {"auto_prune_missing": False, "allow_pinned": True}
+
+        def editor_defaults(self) -> dict[str, object]:
+            return {}
+
+        def recent_files(self) -> list[str]:
+            return [str(project_a)]
+
+        def recent_projects(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "path": str(project_a),
+                    "pinned": True,
+                    "last_opened": 0.0,
+                    "last_saved": 0.0,
+                }
+            ]
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def clear_recent(self) -> None:
+            pass
+
+        def last_dir(self) -> str:
+            return str(tmp_path)
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    window = _make_window(qtbot, monkeypatch, prefs=_RecentPrefs())
+    window.show()
+    QApplication.processEvents()
+
+    recent_item = window._recent_projects_list.item(0)
+    assert recent_item is not None
+    recent_widget = window._recent_projects_list.itemWidget(recent_item)
+    assert recent_widget is not None
+
+    meta_label = recent_widget.findChild(QLabel, "recentProjectItemMeta")
+
+    assert meta_label is not None
+    assert meta_label.isVisible()
+    assert "已置顶" in meta_label.text()
+    assert recent_item.sizeHint().height() >= 88
+
+
+def test_recent_project_item_uses_widget_only_without_fallback_item_text(qtbot, monkeypatch, tmp_path) -> None:
+    project_a = tmp_path / "alpha.json"
+    project_a.write_text("{}", encoding="utf-8")
+
+    class _RecentPrefs:
+        def startup_preferences(self) -> dict[str, object]:
+            return {
+                "remember_window_state": False,
+                "saved_window_rect": [],
+                "auto_open_recent": False,
+                "show_recent_sidebar": True,
+            }
+
+        def recent_workspace_preferences(self) -> dict[str, object]:
+            return {"auto_prune_missing": False, "allow_pinned": True}
+
+        def editor_defaults(self) -> dict[str, object]:
+            return {}
+
+        def recent_files(self) -> list[str]:
+            return [str(project_a)]
+
+        def recent_projects(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "path": str(project_a),
+                    "pinned": False,
+                    "last_opened": 0.0,
+                    "last_saved": 0.0,
+                }
+            ]
+
+        def autosave_enabled(self) -> bool:
+            return False
+
+        def autosave_interval(self) -> int:
+            return 120
+
+        def add_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def remove_recent(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def clear_recent(self) -> None:
+            pass
+
+        def last_dir(self) -> str:
+            return str(tmp_path)
+
+        def set_last_dir(self, path) -> None:  # noqa: ANN001
+            pass
+
+        def show_recent_full_path(self) -> bool:
+            return False
+
+    window = _make_window(qtbot, monkeypatch, prefs=_RecentPrefs())
+    window.show()
+    QApplication.processEvents()
+
+    recent_item = window._recent_projects_list.item(0)
+
+    assert recent_item.text() == ""
+    assert recent_item.data(Qt.ItemDataRole.UserRole + 2)
 
 
 def test_channel_editor_uses_consistent_spacing_without_splitter(qtbot, monkeypatch) -> None:
@@ -692,18 +1187,23 @@ def test_copy_buttons_use_svg_icons_without_emoji_labels(qtbot, monkeypatch) -> 
         assert not any(ch in banned for ch in button.text())
 
 
+def test_recent_project_card_style_uses_transparent_background() -> None:
+    stylesheet = app_stylesheet()
+
+    assert "#recentProjectItemWidget {" in stylesheet
+    assert "background: transparent;" in stylesheet
+
+
 def test_channel_editor_action_buttons_use_svg_icons_without_emoji_labels(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     editor, _table = window._make_channel_editor("CIO")
-    buttons = {
-        button.text(): button
+    buttons = [
+        button.text()
         for button in editor.findChildren(QPushButton)
-        if button.text() in {"添加行", "删除选中"}
-    }
+        if button.text() == "添加行"
+    ]
 
-    assert set(buttons) == {"添加行", "删除选中"}
-    for button in buttons.values():
-        assert button.icon().isNull() is False
+    assert buttons == []
 
 
 def test_zone_picker_dialog_accepts_multiple_selected_zones(qtbot, monkeypatch) -> None:
@@ -822,9 +1322,72 @@ def test_data_type_editor_is_frameless_inline(qtbot) -> None:
 
     assert editor is not None
     assert "border: none" in editor.styleSheet()
-    assert editor.lineEdit() is not None
-    assert not editor.lineEdit().hasFrame()
+    assert editor.isEditable() is False
     assert "background-color:" in editor.styleSheet()
+
+
+def test_data_type_delegate_commits_without_view_warning(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window.show()
+    QApplication.processEvents()
+
+    table = window._channel_tables[0]
+    item = table.item(0, table.COL_DTYPE)
+    assert item is not None
+
+    messages: list[str] = []
+
+    def _handler(_mode, _context, message):  # noqa: ANN001
+        messages.append(message)
+
+    previous = qInstallMessageHandler(_handler)
+    try:
+        table.setCurrentItem(item)
+        table.editItem(item)
+        QApplication.processEvents()
+        combos = [combo for combo in table.findChildren(QComboBox) if combo.parent() == table.viewport()]
+        assert combos
+        combo = combos[-1]
+        combo.setCurrentIndex(combo.findText("INT"))
+        table.closeEditor(combo, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
+        QApplication.processEvents()
+    finally:
+        qInstallMessageHandler(previous)
+
+    assert table.item(0, table.COL_DTYPE).text() == "INT"
+    assert not any("editor that does not belong to this view" in message for message in messages)
+
+
+def test_data_type_delegate_ignores_late_signal_after_editor_closed(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window.show()
+    QApplication.processEvents()
+
+    table = window._channel_tables[0]
+    item = table.item(0, table.COL_DTYPE)
+    assert item is not None
+
+    messages: list[str] = []
+
+    def _handler(_mode, _context, message):  # noqa: ANN001
+        messages.append(message)
+
+    previous = qInstallMessageHandler(_handler)
+    try:
+        table.setCurrentItem(item)
+        table.editItem(item)
+        QApplication.processEvents()
+        combos = [combo for combo in table.findChildren(QComboBox) if combo.parent() == table.viewport()]
+        assert combos
+        combo = combos[-1]
+        table.closeEditor(combo, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
+        QApplication.processEvents()
+        combo.setCurrentIndex((combo.currentIndex() + 1) % combo.count())
+        QApplication.processEvents()
+    finally:
+        qInstallMessageHandler(previous)
+
+    assert not any("editor that does not belong to this view" in message for message in messages)
 
 
 def test_comment_delegate_suggests_opposite_phrase(qtbot) -> None:
@@ -840,6 +1403,11 @@ def test_comment_delegate_suggests_opposite_phrase(qtbot) -> None:
 
     assert completer is not None
     assert completer.completionMode() == completer.CompletionMode.PopupCompletion
+    assert not completer.popup().alternatingRowColors()
+    assert "background-color: #FFFFFF" in completer.popup().styleSheet()
+    assert "QListView::item:selected {" in completer.popup().styleSheet()
+    assert "background-color: #355F8C;" in completer.popup().styleSheet()
+    assert "color: #FFFFFF;" in completer.popup().styleSheet()
     suggestions = [
         completer.model().index(row, 0).data()
         for row in range(completer.model().rowCount())
@@ -949,9 +1517,21 @@ def test_channel_shortcut_hint_matches_current_shortcuts(qtbot, monkeypatch) -> 
         if "快捷键速查" in label.text()
     ]
 
-    assert hints
-    assert "方向键选择建议" in hints[0]
-    assert "Tab 键接受建议" not in hints[0]
+    assert hints == []
+
+
+def test_channel_editor_side_panel_keeps_only_zone_info_panel(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    side_panel = window._editor_side_panels[table]
+
+    assert side_panel.findChildren(ZoneInfoPanel)
+    assert side_panel.findChildren(QPushButton, "batchEditGuideButton") == []
+    assert [
+        button.text()
+        for button in side_panel.findChildren(QPushButton)
+        if button.text() in {"添加行", "删除选中"}
+    ] == []
 
 
 def test_continuous_entry_seeds_next_row_from_previous_values(qtbot) -> None:
@@ -1011,6 +1591,43 @@ def test_batch_generate_rows_creates_address_sequence_and_updates_project(qtbot,
     assert table.item(0, table.COL_COMMENT).text() == "阻挡气缸伸出到位"
     assert table.item(1, table.COL_COMMENT).text() == "阻挡气缸缩回到位"
     assert window._project.channels[0].points[2].usage == "输出"
+
+
+def test_batch_edit_hint_is_visible_in_editor_shell(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+
+    batch_hint = table.parentWidget().findChild(QLabel, "batchEditHint")
+    guide_button = table.parentWidget().findChild(QPushButton, "batchEditGuideButton")
+
+    assert batch_hint is not None
+    assert "点左侧行号可选整行" in batch_hint.text()
+    assert "Ctrl+Z" in batch_hint.text()
+    assert guide_button is not None
+    assert guide_button.toolTip()
+    assert guide_button.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Ignored
+
+
+def test_batch_edit_guide_button_opens_help(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    guide_button = table.parentWidget().findChild(QPushButton, "batchEditGuideButton")
+    seen: dict[str, str] = {}
+
+    def _fake_dialog(title: str, text: str, buttons=("确定",)):  # noqa: ANN001
+        seen["title"] = title
+        seen["text"] = text
+        return "知道了"
+
+    window._dialog_message = _fake_dialog  # type: ignore[method-assign]
+
+    assert guide_button is not None
+
+    qtbot.mouseClick(guide_button, Qt.MouseButton.LeftButton)
+
+    assert seen["title"] == "批量编辑说明"
+    assert "批量生成" in seen["text"]
+    assert "Ctrl+Z" in seen["text"]
 
 
 def test_bulk_row_update_and_text_transform_apply_to_selection(qtbot) -> None:
@@ -1094,4 +1711,16 @@ def test_validation_collects_core_issues(qtbot, monkeypatch) -> None:
     issues = window._collect_validation_issues()
 
     codes = {issue["code"] for issue in issues}
-    assert {"duplicate_address", "missing_name", "invalid_data_type", "empty_preview"} <= codes
+    assert {"duplicate_address", "invalid_data_type", "empty_preview"} <= codes
+    assert "missing_name" not in codes
+    assert window._validation_group is not None
+    assert window._validation_header is not None
+    assert window._validation_body is not None
+    assert window._validation_toggle_btn is not None
+    assert window._validation_summary_label is not None
+    assert window._validation_body.isHidden()
+    assert not window._validation_summary_label.isHidden()
+    assert window._validation_list.maximumHeight() <= 112
+    qtbot.mouseClick(window._validation_header, Qt.MouseButton.LeftButton)
+    assert not window._validation_body.isHidden()
+    assert window._validation_summary_label.isHidden()

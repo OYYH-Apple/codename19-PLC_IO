@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -88,7 +89,8 @@ COL_COMMENT = IoTableWidget.COL_COMMENT
 COL_RACK    = IoTableWidget.COL_RACK
 COL_USAGE   = IoTableWidget.COL_USAGE
 
-PREVIEW_LABEL = "📊 全通道预览"
+PREVIEW_LABEL = "全通道预览"
+LEGACY_PREVIEW_LABEL = "📊 全通道预览"
 
 _APP_TITLE = "欧姆龙 IO 分配助手"
 _VALID_DATA_TYPES = set(combo_items())
@@ -136,6 +138,10 @@ def _next_address_value(address: str) -> str:
     return nxt if nxt else address
 
 
+def _is_preview_tab_label(label: str) -> bool:
+    return label in {PREVIEW_LABEL, LEGACY_PREVIEW_LABEL}
+
+
 def _make_action_btn(
     text: str,
     tooltip: str = "",
@@ -155,7 +161,7 @@ def _make_action_btn(
         btn.setProperty("compact", "true")
         btn.setMinimumWidth(0)
         btn.setMinimumHeight(34)
-        btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
     return btn
 
 
@@ -170,6 +176,208 @@ def _make_immersive_btn(
     btn.setMinimumWidth(max(82, btn.sizeHint().width()))
     btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
     return btn
+
+
+class _RecentProjectItemWidget(QWidget):
+    """最近项目条目，右侧带快捷操作按钮。"""
+
+    open_requested = Signal(str)
+    pin_requested = Signal(str, bool)
+    remove_requested = Signal(str)
+
+    def __init__(
+        self,
+        entry: dict[str, object],
+        show_full_path: bool,
+        *,
+        active: bool = False,
+        missing: bool = False,
+        open_callback=None,
+        pin_callback=None,
+        remove_callback=None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("recentProjectItemWidget")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._path = str(entry.get("path", "") or "")
+        self._pinned = bool(entry.get("pinned", False))
+        self._open_callback = open_callback
+        self._pin_callback = pin_callback
+        self._remove_callback = remove_callback
+        self.setProperty("activeProject", active)
+        self.setProperty("missingProject", missing)
+        self.setProperty("pinnedProject", self._pinned)
+
+        path = Path(self._path)
+        self._title_text = path.name or self._path
+        self._path_text = str(path.resolve()) if show_full_path else str(path.parent)
+        self._meta_text = self._build_meta_text(entry, active=active, missing=missing)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(12, 8, 8, 8)
+        root.setSpacing(8)
+
+        self._text_box = QWidget(self)
+        self._text_box.setObjectName("recentProjectItemTextBox")
+        self._text_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        text_layout = QVBoxLayout(self._text_box)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+
+        self._title_label = QLabel("", self._text_box)
+        self._title_label.setObjectName("recentProjectItemTitle")
+        self._title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._path_label = QLabel("", self._text_box)
+        self._path_label.setObjectName("recentProjectItemPath")
+        self._path_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._meta_label = QLabel("", self._text_box)
+        self._meta_label.setObjectName("recentProjectItemMeta")
+        self._meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        text_layout.addWidget(self._title_label)
+        text_layout.addWidget(self._path_label)
+        text_layout.addWidget(self._meta_label)
+        self._meta_label.hide()
+
+        root.addWidget(self._text_box, 1)
+
+        button_box = QWidget(self)
+        button_box.setObjectName("recentProjectItemActionsBox")
+        button_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        button_layout = QVBoxLayout(button_box)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(4)
+
+        self._pin_btn = self._make_action_button("recentProjectActionButton", "置顶", load_icon("pin"))
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setChecked(self._pinned)
+        self._remove_btn = self._make_action_button(
+            "recentProjectActionButton",
+            "移除最近项目",
+            load_icon("trash"),
+            danger=True,
+        )
+
+        self._pin_btn.toggled.connect(self._on_pin_toggled)
+        self._remove_btn.clicked.connect(lambda: self.remove_requested.emit(self._path))
+        if self._open_callback is not None:
+            self.open_requested.connect(self._open_callback)
+        if self._pin_callback is not None:
+            self.pin_requested.connect(self._pin_callback)
+        if self._remove_callback is not None:
+            self.remove_requested.connect(self._remove_callback)
+        for button in (self._pin_btn, self._remove_btn):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setIconSize(QSize(14, 14))
+            button.setFixedSize(24, 24)
+            button_layout.addWidget(button)
+        button_layout.addStretch(1)
+
+        root.addWidget(button_box, 0)
+        self.setMinimumHeight(70)
+        self._sync_pin_button()
+        QTimer.singleShot(0, self._refresh_text_elision)
+
+    def _build_meta_text(self, entry: dict[str, object], *, active: bool, missing: bool) -> str:
+        tokens: list[str] = []
+        if active:
+            tokens.append("当前项目")
+        if self._pinned:
+            tokens.append("已置顶")
+        if missing:
+            tokens.append("文件不存在")
+        else:
+            saved_at = float(entry.get("last_saved", 0.0) or 0.0)
+            opened_at = float(entry.get("last_opened", 0.0) or 0.0)
+            stamp = saved_at or opened_at
+            if stamp > 0:
+                label = "最近保存" if saved_at >= opened_at else "最近打开"
+                tokens.append(f"{label} {time.strftime('%m-%d %H:%M', time.localtime(stamp))}")
+            elif not tokens:
+                tokens.append("可直接打开")
+        return " · ".join(tokens)
+
+    def _make_action_button(self, object_name: str, tooltip: str, icon, danger: bool = False) -> QToolButton:  # noqa: ANN001
+        button = QToolButton(self)
+        button.setObjectName(object_name)
+        button.setToolTip(tooltip)
+        button.setIcon(icon)
+        button.setAutoRaise(True)
+        if danger:
+            button.setProperty("danger", "true")
+        return button
+
+    def _sync_pin_button(self) -> None:
+        if self._pin_btn.isChecked():
+            self._pin_btn.setIcon(load_icon("pin-light"))
+            self._pin_btn.setToolTip("取消置顶")
+            self._pin_btn.setProperty("pinned", "true")
+        else:
+            self._pin_btn.setIcon(load_icon("pin"))
+            self._pin_btn.setToolTip("置顶")
+            self._pin_btn.setProperty("pinned", "false")
+        self.setProperty("pinnedProject", self._pin_btn.isChecked())
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self._pin_btn.style().unpolish(self._pin_btn)
+        self._pin_btn.style().polish(self._pin_btn)
+
+    def _refresh_text_elision(self) -> None:
+        available = max(120, self._text_box.width() - 4)
+        self._title_label.setText(
+            self._title_label.fontMetrics().elidedText(
+                self._title_text,
+                Qt.TextElideMode.ElideRight,
+                available,
+            )
+        )
+        self._path_label.setText(
+            self._path_label.fontMetrics().elidedText(
+                self._path_text,
+                Qt.TextElideMode.ElideMiddle,
+                available,
+            )
+        )
+        if self._meta_text:
+            self._meta_label.setText(
+                self._meta_label.fontMetrics().elidedText(
+                    self._meta_text,
+                    Qt.TextElideMode.ElideRight,
+                    available,
+                )
+            )
+            self._meta_label.show()
+        else:
+            self._meta_label.clear()
+            self._meta_label.hide()
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        self._sync_pin_button()
+        self.pin_requested.emit(self._path, checked)
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        self._refresh_text_elision()
+        super().resizeEvent(event)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 94 if self._meta_text else 84)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(event.position().toPoint()) if hasattr(event, "position") else self.childAt(event.pos())
+            if child not in (self._pin_btn, self._remove_btn):
+                self.open_requested.emit(self._path)
+        super().mouseReleaseEvent(event)
+
+
+class _ClickableHeader(QWidget):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -193,15 +401,18 @@ class MainWindow(QMainWindow):
         self._recent_group: QGroupBox | None = None
         self._recent_projects_list: QListWidget | None = None
         self._recent_filter_edit: QLineEdit | None = None
-        self._recent_open_btn: QPushButton | None = None
-        self._recent_pin_btn: QPushButton | None = None
-        self._recent_remove_btn: QPushButton | None = None
-        self._recent_clean_btn: QPushButton | None = None
+        self._recent_clean_btn: QToolButton | None = None
+        self._recent_click_pending_activation: str | None = None
         self._project_meta_group: QGroupBox | None = None
         self._copy_group: QGroupBox | None = None
         self._validation_group: QGroupBox | None = None
+        self._validation_header: QWidget | None = None
+        self._validation_body: QWidget | None = None
+        self._validation_toggle_btn: QPushButton | None = None
+        self._validation_summary_label: QLabel | None = None
         self._validation_list: QListWidget | None = None
         self._validation_issues: list[dict[str, object]] = []
+        self._validation_collapsed = True
         self._tabs: QTabWidget | None = None
         self._modified = False          # 未保存修改标记
         self._toast: ToastPopup | None = None
@@ -212,6 +423,7 @@ class MainWindow(QMainWindow):
         self._editor_side_panels: dict[IoTableWidget, QWidget] = {}
         self._editor_filter_edits: dict[IoTableWidget, QLineEdit] = {}
         self._editor_filled_toggles: dict[IoTableWidget, QPushButton] = {}
+        self._batch_help_labels: dict[IoTableWidget, QLabel] = {}
         self._resize_margin = 8
         self._resize_watch_ids: set[int] = set()
         self._opening_recent_path: str | None = None
@@ -503,7 +715,7 @@ class MainWindow(QMainWindow):
                 self._sync_meta_from_project()
                 self._rebuild_tabs(select_index=1)
                 self._set_modified(True)
-                self.statusBar().showMessage("✔ 已恢复自动保存的项目", 4000)
+                self.statusBar().showMessage("已恢复自动保存的项目", 4000)
         elif ret == "清除记录":
             if clear_autosave() is False:
                 self._dialog_warning("清除失败", "自动保存记录未能删除，请检查文件权限。")
@@ -525,46 +737,47 @@ class MainWindow(QMainWindow):
         recent_group = QGroupBox("最近项目")
         self._recent_group = recent_group
         recent_group.setObjectName("recentProjectsGroup")
-        recent_group.setMaximumWidth(260)
-        recent_group.setMinimumWidth(220)
+        recent_group.setMaximumWidth(300)
+        recent_group.setMinimumWidth(240)
         recent_layout = QVBoxLayout(recent_group)
         recent_layout.setContentsMargins(10, 12, 10, 10)
         recent_layout.setSpacing(8)
 
-        recent_hint = QLabel("展示最近打开或保存的项目，单击即可直接切换。")
+        recent_hint = QLabel("展示最近打开或保存的项目；单击直接切换，右侧图标可置顶或移除。")
         recent_hint.setWordWrap(True)
         recent_hint.setStyleSheet("color: #5A6080; font-size: 9pt;")
         recent_layout.addWidget(recent_hint)
 
+        recent_filter_row = QWidget(recent_group)
+        recent_filter_row.setObjectName("recentProjectsFilterRow")
+        recent_filter_layout = QHBoxLayout(recent_filter_row)
+        recent_filter_layout.setContentsMargins(0, 0, 0, 0)
+        recent_filter_layout.setSpacing(6)
+
         self._recent_filter_edit = QLineEdit()
         self._recent_filter_edit.setObjectName("recentProjectsFilter")
+        self._recent_filter_edit.setClearButtonEnabled(True)
         self._recent_filter_edit.setPlaceholderText("筛选项目名称或路径")
         self._recent_filter_edit.textChanged.connect(self._filter_recent_projects_list)
-        recent_layout.addWidget(self._recent_filter_edit)
+        recent_filter_layout.addWidget(self._recent_filter_edit, 1)
+
+        self._recent_clean_btn = QToolButton(recent_filter_row)
+        self._recent_clean_btn.setObjectName("recentProjectActionButton")
+        self._recent_clean_btn.setToolTip("清理失效项目记录")
+        self._recent_clean_btn.setIcon(load_icon("trash"))
+        self._recent_clean_btn.setIconSize(QSize(16, 16))
+        self._recent_clean_btn.setAutoRaise(True)
+        self._recent_clean_btn.setFixedSize(28, 28)
+        self._recent_clean_btn.clicked.connect(self._clean_recent_projects)
+        recent_filter_layout.addWidget(self._recent_clean_btn, 0)
+        recent_layout.addWidget(recent_filter_row)
 
         self._recent_projects_list = QListWidget()
         self._recent_projects_list.setObjectName("recentProjectsList")
-        self._recent_projects_list.itemActivated.connect(self._on_recent_project_clicked)
+        self._recent_projects_list.setSpacing(8)
+        self._recent_projects_list.itemActivated.connect(self._on_recent_project_activated)
         self._recent_projects_list.itemClicked.connect(self._on_recent_project_clicked)
-        self._recent_projects_list.currentItemChanged.connect(lambda *_: self._refresh_recent_project_actions())
         recent_layout.addWidget(self._recent_projects_list, 1)
-
-        recent_actions = QHBoxLayout()
-        recent_actions.setContentsMargins(0, 0, 0, 0)
-        recent_actions.setSpacing(6)
-        self._recent_pin_btn = _make_action_btn("置顶", compact=True)
-        self._recent_open_btn = _make_action_btn("打开", compact=True)
-        self._recent_remove_btn = _make_action_btn("移除", compact=True)
-        self._recent_clean_btn = _make_action_btn("清理失效", compact=True)
-        self._recent_pin_btn.clicked.connect(self._toggle_selected_recent_pin)
-        self._recent_open_btn.clicked.connect(self._open_selected_recent_project)
-        self._recent_remove_btn.clicked.connect(self._remove_selected_recent_project)
-        self._recent_clean_btn.clicked.connect(self._clean_recent_projects)
-        recent_actions.addWidget(self._recent_pin_btn, 1)
-        recent_actions.addWidget(self._recent_open_btn, 1)
-        recent_actions.addWidget(self._recent_remove_btn, 1)
-        recent_actions.addWidget(self._recent_clean_btn, 1)
-        recent_layout.addLayout(recent_actions)
 
         root.addWidget(recent_group, 0)
 
@@ -590,13 +803,37 @@ class MainWindow(QMainWindow):
         form.addRow("项目名称", self._name_edit)
         form.addRow("符号前缀", self._plc_edit)
 
-        ch_row = QHBoxLayout()
-        self._btn_add_ch = _make_action_btn("＋ 添加分区", "从标准欧姆龙分区列表选择，或添加自定义通道")
-        self._btn_del_ch = _make_action_btn("－ 删除当前", "删除当前选中分区（至少保留一个）", danger=True)
-        ch_row.addWidget(self._btn_add_ch)
-        ch_row.addWidget(self._btn_del_ch)
-        ch_row.addStretch()
-        form.addRow(ch_row)
+        project_actions_row = QWidget(meta)
+        project_actions_row.setObjectName("projectMetaActionsRow")
+        project_actions_layout = QHBoxLayout(project_actions_row)
+        project_actions_layout.setContentsMargins(0, 4, 0, 0)
+        project_actions_layout.setSpacing(12)
+
+        copy_group = QWidget(project_actions_row)
+        copy_group.setObjectName("projectMetaCopyPanel")
+        self._copy_group = copy_group
+        copy_layout = QVBoxLayout(copy_group)
+        copy_layout.setContentsMargins(12, 8, 12, 8)
+        copy_layout.setSpacing(6)
+        copy_title = QLabel("导出 / 复制到剪贴板", copy_group)
+        copy_title.setObjectName("projectMetaCopyTitle")
+        copy_layout.addWidget(copy_title)
+        copy_buttons_row = QWidget(copy_group)
+        copy_buttons_row.setObjectName("projectMetaCopyButtons")
+        copy_h = QHBoxLayout(copy_buttons_row)
+        copy_h.setContentsMargins(0, 0, 0, 0)
+        copy_h.setSpacing(8)
+        self._btn_copy_io   = _make_action_btn("IO 表",          "复制当前分区的 IO 表（TSV）", compact=True, icon_name="clipboard-light")
+        self._btn_copy_sym  = _make_action_btn("符号表",          "复制当前分区的符号表（TSV）", compact=True, icon_name="clipboard-light")
+        self._btn_copy_d    = _make_action_btn("D 区 CHANNEL",   "复制 D 区 CHANNEL 行", compact=True, icon_name="clipboard-light")
+        self._btn_copy_cio  = _make_action_btn("CIO 字 CHANNEL", "复制 CIO 字 CHANNEL 行", compact=True, icon_name="clipboard-light")
+        self._btn_copy_all  = _make_action_btn("合并全部分区",    "合并所有分区文本到剪贴板", compact=True, icon_name="clipboard-light")
+        for btn in (self._btn_copy_io, self._btn_copy_sym, self._btn_copy_d, self._btn_copy_cio, self._btn_copy_all):
+            copy_h.addWidget(btn, 0)
+        copy_h.addStretch(1)
+        copy_layout.addWidget(copy_buttons_row)
+        project_actions_layout.addWidget(copy_group, 1)
+        form.addRow(project_actions_row)
         layout.addWidget(meta)
 
         # ── Tab 区 ─────────────────────────────────────────────────────────
@@ -604,36 +841,68 @@ class MainWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         tb = self._tabs.tabBar()
         tb.tabBarDoubleClicked.connect(self._on_tab_bar_double_clicked)
+        tab_corner_actions = QWidget(self._tabs)
+        tab_corner_actions.setObjectName("tabCornerActions")
+        tab_corner_layout = QHBoxLayout(tab_corner_actions)
+        tab_corner_layout.setContentsMargins(0, 0, 0, 0)
+        tab_corner_layout.setSpacing(8)
+        self._btn_add_ch = _make_action_btn(
+            "添加分区",
+            "从标准欧姆龙分区列表选择，或添加自定义通道",
+            compact=True,
+            icon_name="add-light",
+        )
+        self._btn_del_ch = _make_action_btn(
+            "删除当前",
+            "删除当前选中分区（至少保留一个）",
+            danger=True,
+            compact=True,
+            icon_name="trash-light",
+        )
+        tab_corner_layout.addWidget(self._btn_add_ch, 0)
+        tab_corner_layout.addWidget(self._btn_del_ch, 0)
+        self._tabs.setCornerWidget(tab_corner_actions, Qt.Corner.TopRightCorner)
         layout.addWidget(self._tabs, stretch=1)
-
-        # ── 底部操作按钮 ────────────────────────────────────────────────────
-        copy_group = QGroupBox("导出 / 复制到剪贴板")
-        self._copy_group = copy_group
-        copy_h = QHBoxLayout(copy_group)
-        copy_h.setSpacing(8)
-        self._btn_copy_io   = _make_action_btn("IO 表",          "复制当前分区的 IO 表（TSV）", icon_name="clipboard-light")
-        self._btn_copy_sym  = _make_action_btn("符号表",          "复制当前分区的符号表（TSV）", icon_name="clipboard-light")
-        self._btn_copy_d    = _make_action_btn("D 区 CHANNEL",   "复制 D 区 CHANNEL 行", icon_name="clipboard-light")
-        self._btn_copy_cio  = _make_action_btn("CIO 字 CHANNEL", "复制 CIO 字 CHANNEL 行", icon_name="clipboard-light")
-        self._btn_copy_all  = _make_action_btn("合并全部分区",    "合并所有分区文本到剪贴板", icon_name="clipboard-light")
-        for btn in (self._btn_copy_io, self._btn_copy_sym,
-                    self._btn_copy_d, self._btn_copy_cio, self._btn_copy_all):
-            copy_h.addWidget(btn)
-        copy_h.addStretch()
-        layout.addWidget(copy_group)
 
         validation_group = QGroupBox("轻量校验")
         self._validation_group = validation_group
         validation_layout = QVBoxLayout(validation_group)
         validation_layout.setContentsMargins(10, 8, 10, 8)
         validation_layout.setSpacing(6)
-        hint = QLabel("仅提示核心错误；双击问题可直接定位。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #5A6080; font-size: 9pt;")
-        validation_layout.addWidget(hint)
-        self._validation_list = QListWidget(validation_group)
+
+        validation_header = _ClickableHeader(validation_group)
+        validation_header.setObjectName("validationHeader")
+        validation_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        validation_header.clicked.connect(self._toggle_validation_panel)
+        self._validation_header = validation_header
+        validation_header_layout = QHBoxLayout(validation_header)
+        validation_header_layout.setContentsMargins(0, 0, 0, 0)
+        validation_header_layout.setSpacing(8)
+        validation_title = QLabel("仅提示核心错误；双击问题可直接定位。")
+        validation_title.setWordWrap(True)
+        validation_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        validation_header_layout.addWidget(validation_title, 1)
+        self._validation_summary_label = QLabel("", validation_header)
+        self._validation_summary_label.setObjectName("validationSummaryLabel")
+        self._validation_summary_label.setWordWrap(True)
+        self._validation_summary_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._validation_summary_label.hide()
+        validation_header_layout.addWidget(self._validation_summary_label, 1)
+        self._validation_toggle_btn = _make_action_btn("收起详情", compact=True)
+        self._validation_toggle_btn.clicked.connect(self._toggle_validation_panel)
+        validation_header_layout.addWidget(self._validation_toggle_btn, 0)
+        validation_layout.addWidget(validation_header)
+
+        self._validation_body = QWidget(validation_group)
+        self._validation_body.setObjectName("validationBody")
+        validation_body_layout = QVBoxLayout(self._validation_body)
+        validation_body_layout.setContentsMargins(0, 0, 0, 0)
+        validation_body_layout.setSpacing(4)
+        self._validation_list = QListWidget(self._validation_body)
+        self._validation_list.setMaximumHeight(112)
         self._validation_list.itemDoubleClicked.connect(self._jump_to_validation_issue)
-        validation_layout.addWidget(self._validation_list)
+        validation_body_layout.addWidget(self._validation_list)
+        validation_layout.addWidget(self._validation_body)
         layout.addWidget(validation_group)
 
         # 连接
@@ -646,6 +915,7 @@ class MainWindow(QMainWindow):
         self._btn_copy_all.clicked.connect(self._copy_combined)
         self._name_edit.textChanged.connect(self._on_meta_changed)
         self._plc_edit.textChanged.connect(self._on_meta_changed)
+        self._sync_channel_action_buttons()
 
     # ── 预览 Tab ───────────────────────────────────────────────────────────
 
@@ -683,6 +953,8 @@ class MainWindow(QMainWindow):
         b_all     = _make_action_btn("全选", compact=True)
         b_none    = _make_action_btn("全不选", compact=True)
         b_refresh = _make_action_btn("刷新预览", compact=True)
+        for button in (b_all, b_none, b_refresh):
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         b_all.clicked.connect(self._preview_check_all)
         b_none.clicked.connect(self._preview_check_none)
         b_refresh.clicked.connect(self._refresh_preview_table)
@@ -830,15 +1102,6 @@ class MainWindow(QMainWindow):
                         )
                     else:
                         seen_addresses[address] = (channel_index, row_index)
-                if address and not point.name.strip():
-                    issues.append(
-                        {
-                            "code": "missing_name",
-                            "message": f"{channel.name} / 第 {row_index + 1} 行已填写地址但名称为空",
-                            "channel_index": channel_index,
-                            "row_index": row_index,
-                        }
-                    )
                 if point.data_type.strip().upper() not in _VALID_DATA_TYPES:
                     issues.append(
                         {
@@ -868,8 +1131,20 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(str(issue["message"]))
             item.setData(Qt.ItemDataRole.UserRole, issue)
             self._validation_list.addItem(item)
+        has_issues = bool(self._validation_issues)
         self._validation_group.setTitle(f"轻量校验（{len(self._validation_issues)}）")
-        self._validation_group.setHidden(not self._validation_issues)
+        self._validation_group.setHidden(not has_issues)
+        if self._validation_body is not None:
+            self._validation_body.setHidden(self._validation_collapsed or not has_issues)
+        if self._validation_toggle_btn is not None:
+            self._validation_toggle_btn.setHidden(not has_issues)
+            self._validation_toggle_btn.setText("展开详情" if self._validation_collapsed else "收起详情")
+        if self._validation_summary_label is not None:
+            summary = ""
+            if has_issues and self._validation_collapsed:
+                summary = f"已折叠，当前 {len(self._validation_issues)} 项；首项：{self._validation_issues[0]['message']}"
+            self._validation_summary_label.setText(summary)
+            self._validation_summary_label.setVisible(bool(summary))
 
     def _jump_to_validation_issue(self, item: QListWidgetItem) -> None:
         issue = item.data(Qt.ItemDataRole.UserRole)
@@ -888,6 +1163,23 @@ class MainWindow(QMainWindow):
         if 0 <= row_index < table.rowCount():
             table.setCurrentCell(row_index, COL_NAME)
             table.scrollToItem(table.item(row_index, COL_NAME))
+
+    def _toggle_validation_panel(self) -> None:
+        if not self._validation_issues:
+            return
+        self._validation_collapsed = not self._validation_collapsed
+        if self._validation_body is not None:
+            self._validation_body.setHidden(self._validation_collapsed)
+        if self._validation_toggle_btn is not None:
+            self._validation_toggle_btn.setText("展开详情" if self._validation_collapsed else "收起详情")
+        if self._validation_summary_label is not None:
+            if self._validation_collapsed and self._validation_issues:
+                self._validation_summary_label.setText(
+                    f"已折叠，当前 {len(self._validation_issues)} 项；首项：{self._validation_issues[0]['message']}"
+                )
+                self._validation_summary_label.show()
+            else:
+                self._validation_summary_label.hide()
 
     def _confirm_export_validation(self) -> bool:
         issues = self._collect_validation_issues()
@@ -943,15 +1235,38 @@ class MainWindow(QMainWindow):
 
         tools_bar = QWidget()
         tools_bar.setObjectName("editorToolsBar")
-        tools_layout = QHBoxLayout(tools_bar)
+        tools_bar_layout = QVBoxLayout(tools_bar)
+        tools_bar_layout.setContentsMargins(12, 10, 12, 10)
+        tools_bar_layout.setSpacing(8)
+
+        tools_header = QWidget(tools_bar)
+        tools_header.setObjectName("editorToolsHeader")
+        tools_header_layout = QHBoxLayout(tools_header)
+        tools_header_layout.setContentsMargins(0, 0, 0, 0)
+        tools_header_layout.setSpacing(10)
+
+        tools_badge = QLabel("批量编辑", tools_header)
+        tools_badge.setObjectName("editorToolsBadge")
+        tools_summary = QLabel("围绕高频录入的 5 个动作：连续生成、整行统一设置、文本批量修饰。", tools_header)
+        tools_summary.setObjectName("editorToolsSummary")
+        tools_summary.setWordWrap(True)
+        tools_header_layout.addWidget(tools_badge, 0)
+        tools_header_layout.addWidget(tools_summary, 1)
+        tools_bar_layout.addWidget(tools_header, 0)
+
+        tools_buttons_row = QWidget(tools_bar)
+        tools_buttons_row.setObjectName("editorToolsButtonsRow")
+        tools_layout = QHBoxLayout(tools_buttons_row)
         tools_layout.setContentsMargins(0, 0, 0, 0)
-        tools_layout.setSpacing(6)
-        btn_generate = _make_action_btn("批量生成", compact=True)
-        btn_bulk_rows = _make_action_btn("批量设置", compact=True)
-        btn_prefix = _make_action_btn("加前缀", compact=True)
-        btn_suffix = _make_action_btn("加后缀", compact=True)
-        btn_number = _make_action_btn("加编号", compact=True)
-        for button in (btn_generate, btn_bulk_rows, btn_prefix, btn_suffix, btn_number):
+        tools_layout.setSpacing(8)
+        btn_generate = _make_action_btn("批量生成", "从当前行开始，按模板连续生成多行", compact=True)
+        btn_bulk_rows = _make_action_btn("批量设置", "先选中整行，再统一设置数据类型、机架位置、使用", compact=True)
+        btn_prefix = _make_action_btn("加前缀", "对选中单元格追加统一前缀", compact=True)
+        btn_suffix = _make_action_btn("加后缀", "对选中单元格追加统一后缀", compact=True)
+        btn_number = _make_action_btn("加编号", "对选中单元格按顺序追加编号", compact=True)
+        btn_guide = _make_action_btn("使用说明", "查看批量编辑的常用操作说明", compact=True)
+        btn_guide.setObjectName("batchEditGuideButton")
+        for button in (btn_generate, btn_bulk_rows, btn_prefix, btn_suffix, btn_number, btn_guide):
             tools_layout.addWidget(button, 0)
         tools_layout.addStretch(1)
         btn_generate.clicked.connect(lambda: self._open_batch_generate(table))
@@ -959,6 +1274,15 @@ class MainWindow(QMainWindow):
         btn_prefix.clicked.connect(lambda: self._open_bulk_text_transform(table, "prefix"))
         btn_suffix.clicked.connect(lambda: self._open_bulk_text_transform(table, "suffix"))
         btn_number.clicked.connect(lambda: self._open_bulk_text_transform(table, "number"))
+        btn_guide.clicked.connect(self._show_batch_edit_guide)
+        tools_bar_layout.addWidget(tools_buttons_row, 0)
+
+        batch_hint = QLabel(
+            "点左侧行号可选整行；文本操作只处理已选中的单元格；所有批量操作都支持 Ctrl+Z 撤回。"
+        )
+        batch_hint.setObjectName("batchEditHint")
+        batch_hint.setWordWrap(True)
+        tools_bar_layout.addWidget(batch_hint, 0)
 
         focus_bar = QWidget()
         focus_bar.setObjectName("immersiveFocusBar")
@@ -1020,58 +1344,17 @@ class MainWindow(QMainWindow):
 
         # 右侧信息面板
         side_panel = QWidget()
+        side_panel.setObjectName("editorSidePanel")
         side_panel.setHidden(self._immersive_mode)
-        side_layout = QHBoxLayout(side_panel)
+        side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(12)
-
-        btn_col = QWidget()
-        btn_col.setFixedWidth(170)
-        bv = QVBoxLayout(btn_col)
-        bv.setContentsMargins(0, 0, 0, 0)
-        bv.setSpacing(8)
-
-        btn_add = _make_action_btn("添加行", "在末尾追加空行", icon_name="add-light")
-        btn_del = _make_action_btn("删除选中", "删除选中行", danger=True, icon_name="trash-light")
-        btn_add.setMinimumHeight(36)
-        btn_del.setMinimumHeight(36)
-        bv.addWidget(btn_add)
-        bv.addWidget(btn_del)
-        bv.addSpacing(10)
-
-        shortcuts = QLabel(
-            "<b>快捷键速查</b><br>"
-            "Ctrl+D　向下填充<br>"
-            "Ctrl+C/V　复制/粘贴<br>"
-            "Delete　清除单元格<br>"
-            "Tab　移动到下一列<br>"
-            "Enter　移动到下一行<br>"
-            "Ctrl+Z/Y　撤销/重做<br>"
-            "<br>"
-            "<b>名称补全</b><br>"
-            "方向键选择建议，Enter 确认<br>"
-            "<br>"
-            "<b>沉浸模式</b><br>"
-            "F11 切换画布<br>"
-            "Ctrl+F 聚焦筛选"
-        )
-        shortcuts.setWordWrap(True)
-        shortcuts.setStyleSheet(
-            "font-size: 8pt; color: #6070A0; "
-            "background: #EEF2FF; border-radius: 6px; "
-            "padding: 8px;"
-        )
-        bv.addWidget(shortcuts)
-        bv.addStretch()
-        side_layout.addWidget(btn_col, 0)
+        side_layout.setSpacing(0)
 
         zone_panel = ZoneInfoPanel()
         zone_panel.set_zone_by_id(zone_id)
-        side_layout.addWidget(zone_panel, 0)
+        side_layout.addWidget(zone_panel, 0, Qt.AlignmentFlag.AlignTop)
+        side_layout.addStretch(1)
         outer_h.addWidget(side_panel, 0)
-
-        btn_add.clicked.connect(lambda: self._add_row_to(table))
-        btn_del.clicked.connect(lambda: self._del_rows_in(table))
 
         self._editor_focus_bars[table] = focus_bar
         self._editor_side_panels[table] = side_panel
@@ -1180,7 +1463,7 @@ class MainWindow(QMainWindow):
             )
             self._set_immersive_mode(immersive_mode)
             active_tab = str(state.get("active_tab", "") or "")
-            if active_tab == PREVIEW_LABEL:
+            if _is_preview_tab_label(active_tab):
                 return 0
             for index, channel in enumerate(self._project.channels, start=1):
                 if channel.name == active_tab:
@@ -1220,10 +1503,25 @@ class MainWindow(QMainWindow):
         idx = max(0, min(idx, self._tabs.count() - 1))
         self._tabs.setCurrentIndex(idx)
         self._prev_tab_index = idx
+        self._sync_channel_action_buttons()
         if idx == 0:
             self._ensure_preview_fresh()
         self._refresh_validation_panel()
         self._install_resize_watchers(self)
+
+    def _sync_channel_action_buttons(self) -> None:
+        if self._tabs is None:
+            return
+        current_index = self._tabs.currentIndex()
+        can_delete = current_index > 0 and len(self._project.channels) > 1
+        self._btn_add_ch.setEnabled(True)
+        self._btn_del_ch.setEnabled(can_delete)
+        if current_index <= 0:
+            self._btn_del_ch.setToolTip("切换到具体分区后可删除当前分区")
+        elif len(self._project.channels) <= 1:
+            self._btn_del_ch.setToolTip("至少保留一个分区")
+        else:
+            self._btn_del_ch.setToolTip("删除当前选中分区（至少保留一个）")
 
     def _color_tab(self, tab_index: int, zone_id: str) -> None:
         if not self._tabs:
@@ -1307,6 +1605,9 @@ class MainWindow(QMainWindow):
         self._schedule_preview_refresh()
 
     def _open_bulk_row_update(self, table: IoTableWidget) -> None:
+        if not table.selected_row_numbers():
+            self._show_toast("批量设置", "请先点击左侧行号，选择一行或多行后再执行批量设置。", "info")
+            return
         dialog = BulkRowUpdateDialog(parent=self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -1319,6 +1620,9 @@ class MainWindow(QMainWindow):
         self._schedule_preview_refresh()
 
     def _open_bulk_text_transform(self, table: IoTableWidget, mode: str) -> None:
+        if not table.selectedIndexes() and not table.currentIndex().isValid():
+            self._show_toast("批量文本处理", "请先选中要处理的单元格，再执行批量文本操作。", "info")
+            return
         if mode == "number":
             value, ok = self._dialog_int("批量加编号", "起始编号：", 1, 1, 9999)
             if not ok:
@@ -1334,6 +1638,20 @@ class MainWindow(QMainWindow):
         self._sync_table_to_project(table)
         self._set_modified(True)
         self._schedule_preview_refresh()
+
+    def _show_batch_edit_guide(self) -> None:
+        self._dialog_message(
+            "批量编辑说明",
+            "\n".join(
+                [
+                    "1. 批量生成：把光标放到起始行，按模板连续生成多行。",
+                    "2. 批量设置：先点击左侧行号选中一行或多行，再统一改数据类型、机架位置、使用。",
+                    "3. 加前缀/加后缀/加编号：先选中要处理的单元格区域，只会改已有文本。",
+                    "4. 所有批量操作都进入撤销栈，可直接使用 Ctrl+Z 撤回。",
+                ]
+            ),
+            buttons=("知道了",),
+        )
 
     def _current_channel_table(self) -> IoTableWidget | None:
         if self._tabs is None:
@@ -1464,6 +1782,7 @@ class MainWindow(QMainWindow):
 
     def _flush_all_channel_tables(self) -> None:
         for i, tbl in enumerate(self._channel_tables):
+            tbl.flush_active_editor()
             if i < len(self._project.channels):
                 self._project.channels[i].points = self._read_points_from_table(tbl)
 
@@ -1471,6 +1790,7 @@ class MainWindow(QMainWindow):
         if self._building_tabs or self._tabs is None:
             return
         self._prev_tab_index = idx
+        self._sync_channel_action_buttons()
         if idx == 0:
             self._sync_preview_channel_list()
             self._ensure_preview_fresh()
@@ -1733,40 +2053,50 @@ class MainWindow(QMainWindow):
             for path in prefs.recent_files()
         ]
         self._recent_projects_list.clear()
+        self._recent_click_pending_activation = None
         show_full_path = prefs.show_recent_full_path() if hasattr(prefs, "show_recent_full_path") else False
         for entry in recents:
             path = str(entry["path"])
             file_path = Path(path)
             title = f"置顶 · {file_path.name}" if bool(entry.get("pinned", False)) else file_path.name
-            last_opened = float(entry.get("last_opened", 0.0) or 0.0)
-            last_saved = float(entry.get("last_saved", 0.0) or 0.0)
-            if file_path.exists():
-                modified = time.strftime("%Y-%m-%d %H:%M", time.localtime(file_path.stat().st_mtime))
-                display_path = str(file_path.resolve()) if show_full_path else str(file_path.parent)
-                opened_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_opened)) if last_opened else "未记录"
-                saved_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_saved)) if last_saved else modified
-                detail = f"{display_path}\n最近打开：{opened_text}  ·  最近保存：{saved_text}"
-            else:
-                display_path = str(file_path.resolve()) if show_full_path else str(file_path.parent)
-                detail = f"{display_path}\n文件不存在"
-            item = QListWidgetItem(f"{title}\n{detail}")
+            display_path = str(file_path.resolve()) if show_full_path else str(file_path.parent)
+            detail = display_path if file_path.exists() else f"{display_path}\n文件不存在"
+            item = QListWidgetItem()
             item.setToolTip(path)
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(entry.get("pinned", False)))
-            item.setSizeHint(QSize(0, 54))
-            if self._project_path and Path(path) == self._project_path:
-                item.setBackground(QColor("#E8EFFD"))
-                item.setForeground(QColor("#1E4FA3"))
-            elif not file_path.exists():
-                item.setForeground(QColor("#9A5A5A"))
+            item.setData(Qt.ItemDataRole.UserRole + 2, f"{title}\n{detail}")
+            widget = _RecentProjectItemWidget(
+                entry,
+                show_full_path,
+                active=bool(self._project_path and Path(path) == self._project_path),
+                missing=not file_path.exists(),
+                open_callback=self._open_recent,
+                pin_callback=self._set_recent_project_pinned,
+                remove_callback=self._remove_recent_project_entry,
+                parent=self._recent_projects_list,
+            )
+            item.setSizeHint(widget.sizeHint())
             self._recent_projects_list.addItem(item)
+            self._recent_projects_list.setItemWidget(item, widget)
         self._filter_recent_projects_list(self._recent_filter_edit.text() if self._recent_filter_edit else "")
         self._refresh_recent_project_actions()
 
     def _on_recent_project_clicked(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(path, str) and path:
+            self._recent_click_pending_activation = path
             self._open_recent(path)
+
+    def _on_recent_project_activated(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(path, str) or not path:
+            return
+        if self._recent_click_pending_activation == path:
+            self._recent_click_pending_activation = None
+            return
+        self._recent_click_pending_activation = None
+        self._open_recent(path)
 
     def _filter_recent_projects_list(self, text: str) -> None:
         if self._recent_projects_list is None:
@@ -1774,7 +2104,8 @@ class MainWindow(QMainWindow):
         query = text.strip().casefold()
         for index in range(self._recent_projects_list.count()):
             item = self._recent_projects_list.item(index)
-            haystack = f"{item.text()} {item.toolTip()}".casefold()
+            search_text = item.data(Qt.ItemDataRole.UserRole + 2)
+            haystack = f"{search_text or ''} {item.toolTip()}".casefold()
             item.setHidden(bool(query) and query not in haystack)
 
     def _selected_recent_project_path(self) -> str | None:
@@ -1792,14 +2123,13 @@ class MainWindow(QMainWindow):
         return bool(self._recent_projects_list.currentItem().data(Qt.ItemDataRole.UserRole + 1))
 
     def _refresh_recent_project_actions(self) -> None:
-        has_current = self._selected_recent_project_path() is not None
-        if self._recent_pin_btn is not None:
-            self._recent_pin_btn.setEnabled(has_current)
-            self._recent_pin_btn.setText("取消置顶" if self._selected_recent_project_pinned() else "置顶")
-        if self._recent_open_btn is not None:
-            self._recent_open_btn.setEnabled(has_current)
-        if self._recent_remove_btn is not None:
-            self._recent_remove_btn.setEnabled(has_current)
+        if self._recent_clean_btn is not None:
+            prefs = get_prefs()
+            recent_entries = prefs.recent_projects() if hasattr(prefs, "recent_projects") else [
+                {"path": path} for path in prefs.recent_files()
+            ]
+            has_missing = any(not Path(str(entry.get("path", "") or "")).exists() for entry in recent_entries)
+            self._recent_clean_btn.setEnabled(has_missing)
 
     def _open_selected_recent_project(self) -> None:
         path = self._selected_recent_project_path()
@@ -1817,9 +2147,24 @@ class MainWindow(QMainWindow):
         path = self._selected_recent_project_path()
         if not path:
             return
+        self._set_recent_project_pinned(path, not self._selected_recent_project_pinned())
+
+    def _set_recent_project_pinned(self, path: str, pinned: bool) -> None:
         prefs = get_prefs()
         if hasattr(prefs, "set_recent_pinned"):
-            prefs.set_recent_pinned(path, not self._selected_recent_project_pinned())
+            prefs.set_recent_pinned(path, pinned)
+        self._rebuild_recent_menu()
+
+    def _remove_recent_project_entry(self, path: str) -> None:
+        choice = self._dialog_message(
+            "移除最近项目",
+            f"确认从最近项目列表中移除「{Path(path).name}」？",
+            buttons=("移除", "取消"),
+        )
+        if choice != "移除":
+            return
+        prefs = get_prefs()
+        prefs.remove_recent(path)
         self._rebuild_recent_menu()
 
     def _clean_recent_projects(self) -> None:
@@ -1996,11 +2341,11 @@ class MainWindow(QMainWindow):
     def _copy_tsv(self, rows) -> None:
         text = tsv_from_rows(rows)
         QApplication.clipboard().setText(text)
-        self.statusBar().showMessage("✔ 已复制 TSV 到剪贴板", 3000)
+        self.statusBar().showMessage("已复制 TSV 到剪贴板", 3000)
 
     def _copy_combined(self) -> None:
         QApplication.clipboard().setText(combined_export_text(self._project))
-        self.statusBar().showMessage("✔ 已复制合并文本（全部分区）到剪贴板", 3000)
+        self.statusBar().showMessage("已复制合并文本（全部分区）到剪贴板", 3000)
 
     # ══════════════════════════════════════════════════════════════════════════
     # 文件操作
@@ -2060,11 +2405,11 @@ class MainWindow(QMainWindow):
         self._rebuild_recent_menu()
         self._sync_meta_from_project()
         active_tab = self._project.workspace_state.get("active_tab", "") if isinstance(self._project.workspace_state, dict) else ""
-        select_index = 0 if active_tab == PREVIEW_LABEL else 1
+        select_index = 0 if _is_preview_tab_label(str(active_tab)) else 1
         self._rebuild_tabs(select_index=select_index)
         self._set_modified(False)
         self._update_title()
-        self.statusBar().showMessage(f"✔ 已打开 {path}", 3000)
+        self.statusBar().showMessage(f"已打开 {path}", 3000)
 
     def _save_json(self) -> None:
         path = str(self._project_path) if self._project_path else ""
@@ -2098,7 +2443,7 @@ class MainWindow(QMainWindow):
             self._set_modified(False)
             self._update_title()
             clear_autosave()  # 成功保存后清除自动保存槽
-            self.statusBar().showMessage(f"✔ 已保存 {path}", 3000)
+            self.statusBar().showMessage(f"已保存 {path}", 3000)
             self._show_toast("保存成功", f"项目已保存到 {Path(path).name}", "success")
         except Exception as e:
             self._show_toast("保存失败", str(e), "error")
@@ -2129,7 +2474,7 @@ class MainWindow(QMainWindow):
         self._rebuild_tabs(select_index=1)
         self._set_modified(True)
         n = sum(len(c.points) for c in self._project.channels)
-        self.statusBar().showMessage(f"✔ 已导入 {n} 点", 3000)
+        self.statusBar().showMessage(f"已导入 {n} 点", 3000)
 
     def _import_excel_first_sheet(self) -> None:
         prefs = get_prefs()
@@ -2150,7 +2495,7 @@ class MainWindow(QMainWindow):
         self._rebuild_tabs(select_index=1)
         self._set_modified(True)
         n = sum(len(c.points) for c in self._project.channels)
-        self.statusBar().showMessage(f"✔ 已导入 {n} 点", 3000)
+        self.statusBar().showMessage(f"已导入 {n} 点", 3000)
 
     def _export_excel(self) -> None:
         self._flush_all_channel_tables()
@@ -2165,7 +2510,7 @@ class MainWindow(QMainWindow):
         try:
             save_project_excel(self._project, path)
             prefs.set_last_dir(path)
-            self.statusBar().showMessage(f"✔ 已导出 {path}", 3000)
+            self.statusBar().showMessage(f"已导出 {path}", 3000)
         except Exception as e:
             self._dialog_error("导出失败", str(e))
 
@@ -2183,7 +2528,7 @@ class MainWindow(QMainWindow):
         try:
             Path(path).write_text(text, encoding="utf-8-sig")
             prefs.set_last_dir(path)
-            self.statusBar().showMessage(f"✔ 已导出 {path}", 3000)
+            self.statusBar().showMessage(f"已导出 {path}", 3000)
         except Exception as e:
             self._dialog_error("导出失败", str(e))
 

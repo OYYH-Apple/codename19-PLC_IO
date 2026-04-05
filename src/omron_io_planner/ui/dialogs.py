@@ -545,7 +545,7 @@ class BatchGenerateDialog(AppDialog):
         self.setMinimumWidth(460)
         defaults = dict(defaults)
 
-        intro = QLabel("模板支持 {n} / {n:02} 数字占位，以及 [伸出|缩回] 这类成对选项。", self._body)
+        intro = QLabel("模板支持 {n} / {n:02} 数字占位，以及 [伸出|缩回] 这类成对选项；会从当前行开始连续写入。", self._body)
         intro.setWordWrap(True)
         self._body_layout.addWidget(intro)
 

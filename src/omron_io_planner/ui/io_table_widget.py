@@ -40,6 +40,7 @@ from typing import Optional
 from PySide6.QtCore import (
     QMimeData,
     QModelIndex,
+    QItemSelectionModel,
     QPoint,
     QRect,
     QSize,
@@ -65,6 +66,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
+    QTableWidgetSelectionRange,
 )
 
 from .highlight_header_view import _HighlightHeaderView
@@ -425,6 +427,115 @@ class _MoveRowsCommand(QUndoCommand):
                     self._table.setItem(row, col, QTableWidgetItem(""))
         self._table.blockSignals(False)
         self._table._after_batch_change("move_rows")
+
+
+class _InsertRowCommand(QUndoCommand):
+    """插入空白行撤销命令。"""
+
+    def __init__(self, table: "IoTableWidget", row: int) -> None:
+        super().__init__("插入行")
+        self._table = table
+        self._row = row
+
+    def redo(self) -> None:
+        self._table.blockSignals(True)
+        self._table.insertRow(self._row)
+        for col in range(self._table.columnCount()):
+            self._table.setItem(self._row, col, QTableWidgetItem(""))
+        self._table.blockSignals(False)
+        self._table._after_batch_change("insert_row", self._row)
+
+    def undo(self) -> None:
+        if self._row < 0 or self._row >= self._table.rowCount():
+            return
+        self._table.blockSignals(True)
+        self._table.removeRow(self._row)
+        self._table.blockSignals(False)
+        self._table._after_batch_change("insert_row", max(0, self._row - 1))
+
+
+class _InsertRowsCommand(QUndoCommand):
+    """插入多行撤销命令。"""
+
+    def __init__(
+        self,
+        table: "IoTableWidget",
+        row: int,
+        row_data: list[list[dict]],
+        description: str = "插入行",
+        reason: str = "insert_row",
+        select_inserted: bool = False,
+        current_column: int | None = None,
+    ) -> None:
+        super().__init__(description)
+        self._table = table
+        self._row = row
+        self._row_data = row_data
+        self._reason = reason
+        self._select_inserted = select_inserted
+        self._current_column = current_column
+
+    def redo(self) -> None:
+        self._table.blockSignals(True)
+        for offset, data in enumerate(self._row_data):
+            target_row = self._row + offset
+            self._table.insertRow(target_row)
+            for col in range(self._table.columnCount()):
+                if self._table.item(target_row, col) is None:
+                    self._table.setItem(target_row, col, QTableWidgetItem(""))
+            self._table._restore_row_data(target_row, data)
+        self._table.blockSignals(False)
+        if self._select_inserted:
+            self._table._select_rows(
+                list(range(self._row, self._row + len(self._row_data))),
+                current_column=self._current_column,
+            )
+        self._table._after_batch_change(self._reason, self._row + len(self._row_data) - 1)
+
+    def undo(self) -> None:
+        self._table.blockSignals(True)
+        for _ in self._row_data:
+            if 0 <= self._row < self._table.rowCount():
+                self._table.removeRow(self._row)
+        self._table.blockSignals(False)
+        self._table._after_batch_change(self._reason, max(0, self._row - 1))
+
+
+class _DeleteRowsCommand(QUndoCommand):
+    """删除多行撤销命令。"""
+
+    def __init__(
+        self,
+        table: "IoTableWidget",
+        rows: list[int],
+        row_data: list[list[dict]],
+        description: str = "删除行",
+        reason: str = "delete_rows",
+    ) -> None:
+        super().__init__(description)
+        self._table = table
+        self._rows = rows
+        self._row_data = row_data
+        self._reason = reason
+
+    def redo(self) -> None:
+        self._table.blockSignals(True)
+        for row in reversed(self._rows):
+            if 0 <= row < self._table.rowCount():
+                self._table.removeRow(row)
+        self._table.blockSignals(False)
+        self._table._after_batch_change(self._reason, self._rows[0] if self._rows else None)
+
+    def undo(self) -> None:
+        self._table.blockSignals(True)
+        for row, data in zip(self._rows, self._row_data):
+            self._table.insertRow(row)
+            for col in range(self._table.columnCount()):
+                if self._table.item(row, col) is None:
+                    self._table.setItem(row, col, QTableWidgetItem(""))
+            self._table._restore_row_data(row, data)
+        self._table.blockSignals(False)
+        self._table._after_batch_change(self._reason, self._rows[-1] if self._rows else None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -832,21 +943,17 @@ class IoTableWidget(QTableWidget):
 
         snapshots = [self._snapshot_row_data(row) for row in rows]
         insert_at = rows[-1] + 1
-        self.blockSignals(True)
-        for offset, data in enumerate(snapshots):
-            target_row = insert_at + offset
-            self.insertRow(target_row)
-            for col in range(self.columnCount()):
-                if self.item(target_row, col) is None:
-                    self.setItem(target_row, col, QTableWidgetItem(""))
-            self._restore_row_data(target_row, data)
-        self.blockSignals(False)
-
-        self.clearSelection()
-        for offset in range(len(snapshots)):
-            self.selectRow(insert_at + offset)
-        self.setCurrentCell(insert_at, self.currentColumn() if self.currentColumn() >= 0 else self.COL_NAME)
-        self._after_batch_change("duplicate_rows", insert_at + len(snapshots) - 1)
+        self._undo_stack.push(
+            _InsertRowsCommand(
+                self,
+                insert_at,
+                snapshots,
+                description="复制行",
+                reason="duplicate_rows",
+                select_inserted=True,
+                current_column=self.currentColumn() if self.currentColumn() >= 0 else self.COL_NAME,
+            )
+        )
 
     def selected_row_numbers(self) -> list[int]:
         rows = sorted({index.row() for index in self.selectedIndexes()})
@@ -1011,6 +1118,19 @@ class IoTableWidget(QTableWidget):
 
     def commit_editor_text(self, row: int, col: int, text: str) -> None:
         self._apply_cell_edit(row, col, text)
+
+    def flush_active_editor(self) -> None:
+        if self.state() != QAbstractItemView.State.EditingState:
+            return
+        editor = QApplication.focusWidget()
+        if editor is None or not self.isAncestorOf(editor):
+            return
+        while editor is not None and editor.parentWidget() is not self.viewport():
+            editor = editor.parentWidget()
+        if editor is None or editor.parentWidget() is not self.viewport():
+            return
+        self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
+        QApplication.processEvents()
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         # 清除复制选区的蚂蚁线（因为内容已变）
@@ -1459,26 +1579,31 @@ class IoTableWidget(QTableWidget):
         # Ctrl+Home 跳到 A1
         if ctrl and key == Qt.Key.Key_Home:
             if self.rowCount() > 0 and self.columnCount() > 0:
-                self.setCurrentCell(0, 0)
+                self._activate_cell(0, 0)
             return
 
         # Ctrl+End 跳到数据最后一行最后一列
         if ctrl and key == Qt.Key.Key_End:
             if self.rowCount() > 0 and self.columnCount() > 0:
-                # 找到最后一行有数据的行
-                last_data_row = -1
-                for r in range(self.rowCount() - 1, -1, -1):
-                    has_data = False
-                    for c in range(self.columnCount()):
-                        item = self.item(r, c)
-                        if item and item.text().strip():
-                            has_data = True
-                            break
-                    if has_data:
-                        last_data_row = r
-                        break
-                if last_data_row >= 0:
-                    self.setCurrentCell(last_data_row, self.columnCount() - 1)
+                last_used = self._last_used_cell()
+                if last_used is not None:
+                    self._activate_cell(*last_used)
+                else:
+                    self._activate_cell(0, 0)
+            return
+
+        # Ctrl+Shift+方向键跳到边缘并扩展选区
+        if ctrl and shift and key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right):
+            idx = self.currentIndex()
+            if not idx.isValid():
+                super().keyPressEvent(event)
+                return
+            r, c = idx.row(), idx.column()
+            dr = -1 if key == Qt.Key.Key_Up else 1 if key == Qt.Key.Key_Down else 0
+            dc = -1 if key == Qt.Key.Key_Left else 1 if key == Qt.Key.Key_Right else 0
+            nr, nc = self._data_edge_target(r, c, dr, dc)
+            anchor_row, anchor_col = self._selection_anchor(r, c)
+            self._select_range(anchor_row, anchor_col, nr, nc)
             return
 
         # 方向键扩展选区（Shift+方向键）
@@ -1497,8 +1622,8 @@ class IoTableWidget(QTableWidget):
                 nc = max(0, c - 1)
             elif key == Qt.Key.Key_Right:
                 nc = min(self.columnCount() - 1, c + 1)
-            self.setCurrentCell(nr, nc)
-            # Qt 会自动扩展选区
+            anchor_row, anchor_col = self._selection_anchor(r, c)
+            self._select_range(anchor_row, anchor_col, nr, nc)
             return
 
         # Ctrl+方向键跳到数据边缘
@@ -1508,75 +1633,10 @@ class IoTableWidget(QTableWidget):
                 super().keyPressEvent(event)
                 return
             r, c = idx.row(), idx.column()
-            nr, nc = r, c
-            if key == Qt.Key.Key_Up:
-                # 向上找第一个非空单元格
-                nr = -1
-                for rr in range(r - 1, -1, -1):
-                    if self.item(rr, c) and self.item(rr, c).text().strip():
-                        nr = rr
-                        break
-                if nr < 0:
-                    nr = 0
-            elif key == Qt.Key.Key_Down:
-                # 向下找第一个非空单元格
-                nr = self.rowCount() - 1
-                for rr in range(r + 1, self.rowCount()):
-                    if self.item(rr, c) and self.item(rr, c).text().strip():
-                        nr = rr
-                        break
-            elif key == Qt.Key.Key_Left:
-                # 向左找第一个非空单元格
-                nc = -1
-                for cc in range(c - 1, -1, -1):
-                    if self.item(r, cc) and self.item(r, cc).text().strip():
-                        nc = cc
-                        break
-                if nc < 0:
-                    nc = 0
-            elif key == Qt.Key.Key_Right:
-                # 向右找第一个非空单元格
-                nc = self.columnCount() - 1
-                for cc in range(c + 1, self.columnCount()):
-                    if self.item(r, cc) and self.item(r, cc).text().strip():
-                        nc = cc
-                        break
-            self.setCurrentCell(nr, nc)
-            return
-
-        # Ctrl+Shift+方向键跳到边缘并扩展选区
-        if ctrl and shift and key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right):
-            idx = self.currentIndex()
-            if not idx.isValid():
-                super().keyPressEvent(event)
-                return
-            r, c = idx.row(), idx.column()
-            nr, nc = r, c
-            if key == Qt.Key.Key_Up:
-                nr = 0
-                for rr in range(r - 1, -1, -1):
-                    if self.item(rr, c) and self.item(rr, c).text().strip():
-                        nr = rr
-                        break
-            elif key == Qt.Key.Key_Down:
-                nr = self.rowCount() - 1
-                for rr in range(r + 1, self.rowCount()):
-                    if self.item(rr, c) and self.item(rr, c).text().strip():
-                        nr = rr
-                        break
-            elif key == Qt.Key.Key_Left:
-                nc = 0
-                for cc in range(c - 1, -1, -1):
-                    if self.item(r, cc) and self.item(r, cc).text().strip():
-                        nc = cc
-                        break
-            elif key == Qt.Key.Key_Right:
-                nc = self.columnCount() - 1
-                for cc in range(c + 1, self.columnCount()):
-                    if self.item(r, cc) and self.item(r, cc).text().strip():
-                        nc = cc
-                        break
-            self.setCurrentCell(nr, nc)
+            dr = -1 if key == Qt.Key.Key_Up else 1 if key == Qt.Key.Key_Down else 0
+            dc = -1 if key == Qt.Key.Key_Left else 1 if key == Qt.Key.Key_Right else 0
+            nr, nc = self._data_edge_target(r, c, dr, dc)
+            self._activate_cell(nr, nc)
             return
 
         # ── 原有快捷键 ──────────────────────────────────────────────────────
@@ -1660,8 +1720,7 @@ class IoTableWidget(QTableWidget):
             self._seed_row_from_previous(idx.row(), r)
 
         self._ensure_spare_rows(r)
-        self.setCurrentCell(r, c)
-        self.scrollTo(self.model().index(r, c))
+        self._activate_cell(r, c)
 
     def _seed_row_from_previous(self, source_row: int, target_row: int) -> None:
         if target_row <= source_row:
@@ -1704,6 +1763,102 @@ class IoTableWidget(QTableWidget):
                 _queue_if_blank(self.COL_COMMENT, next_comments[0])
         if changes:
             self._undo_stack.push(_MultiCellCommand(self, changes, "连续录入补全", "continuous_entry"))
+
+    def _activate_cell(self, row: int, col: int) -> None:
+        idx = self.model().index(row, col)
+        self.selectionModel().setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self.scrollTo(idx)
+
+    def _selection_anchor(self, row: int, col: int) -> tuple[int, int]:
+        for selection_range in self.selectedRanges():
+            if (
+                selection_range.topRow() <= row <= selection_range.bottomRow()
+                and selection_range.leftColumn() <= col <= selection_range.rightColumn()
+            ):
+                anchor_row = (
+                    selection_range.bottomRow()
+                    if row == selection_range.topRow()
+                    else selection_range.topRow()
+                    if row == selection_range.bottomRow()
+                    else row
+                )
+                anchor_col = (
+                    selection_range.rightColumn()
+                    if col == selection_range.leftColumn()
+                    else selection_range.leftColumn()
+                    if col == selection_range.rightColumn()
+                    else col
+                )
+                return anchor_row, anchor_col
+        return row, col
+
+    def _select_range(self, anchor_row: int, anchor_col: int, row: int, col: int) -> None:
+        self.clearSelection()
+        self.setRangeSelected(
+            QTableWidgetSelectionRange(
+                min(anchor_row, row),
+                min(anchor_col, col),
+                max(anchor_row, row),
+                max(anchor_col, col),
+            ),
+            True,
+        )
+        idx = self.model().index(row, col)
+        self.selectionModel().setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.scrollTo(idx)
+
+    def _select_rows(self, rows: list[int], current_column: int | None = None) -> None:
+        valid_rows = [row for row in rows if 0 <= row < self.rowCount()]
+        if not valid_rows:
+            return
+        self.clearSelection()
+        for row in valid_rows:
+            self.selectRow(row)
+        col = current_column if current_column is not None and 0 <= current_column < self.columnCount() else self.COL_NAME
+        idx = self.model().index(valid_rows[0], col)
+        self.selectionModel().setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.scrollTo(idx)
+
+    def _last_used_cell(self) -> tuple[int, int] | None:
+        for row in range(self.rowCount() - 1, -1, -1):
+            for col in range(self.columnCount() - 1, -1, -1):
+                item = self.item(row, col)
+                if item and item.text().strip():
+                    return row, col
+        return None
+
+    def _data_edge_target(self, row: int, col: int, dr: int, dc: int) -> tuple[int, int]:
+        if dr != 0:
+            return self._data_edge_target_on_axis(row, col, dr, axis="row")
+        if dc != 0:
+            return self._data_edge_target_on_axis(row, col, dc, axis="col")
+        return row, col
+
+    def _data_edge_target_on_axis(self, row: int, col: int, step: int, axis: str) -> tuple[int, int]:
+        max_index = self.rowCount() - 1 if axis == "row" else self.columnCount() - 1
+        current = row if axis == "row" else col
+        next_index = current + step
+        if not 0 <= next_index <= max_index:
+            return row, col
+
+        def _cell_has_text(index: int) -> bool:
+            target_row = index if axis == "row" else row
+            target_col = col if axis == "row" else index
+            item = self.item(target_row, target_col)
+            return bool(item and item.text().strip())
+
+        if _cell_has_text(current) and _cell_has_text(next_index):
+            target = next_index
+            while 0 <= target + step <= max_index and _cell_has_text(target + step):
+                target += step
+        else:
+            target = next_index
+            while 0 <= target <= max_index and not _cell_has_text(target):
+                target += step
+            if not 0 <= target <= max_index:
+                target = 0 if step < 0 else max_index
+
+        return (target, col) if axis == "row" else (row, target)
 
     # ── 复制 / 粘贴 / 清除 ────────────────────────────────────────────────
 
@@ -1936,21 +2091,13 @@ class IoTableWidget(QTableWidget):
         idx = self.currentIndex()
         r = idx.row() if idx.isValid() else self.rowCount() - 1
         insert_at = r + 1 if below else r
-        self.blockSignals(True)
-        self.insertRow(insert_at)
-        for c in range(self.columnCount()):
-            self.setItem(insert_at, c, QTableWidgetItem(""))
-        self.blockSignals(False)
-        self._after_batch_change("insert_row", insert_at)
+        self._undo_stack.push(_InsertRowCommand(self, insert_at))
 
     def _delete_selected_rows(self) -> None:
-        rows = sorted({i.row() for i in self.selectedIndexes()}, reverse=True)
-        self.blockSignals(True)
-        for r in rows:
-            self.removeRow(r)
-        self.blockSignals(False)
+        rows = sorted({i.row() for i in self.selectedIndexes()})
         if rows:
-            self._after_batch_change("delete_rows", min(rows))
+            row_data = [self._snapshot_row_data(row) for row in rows]
+            self._undo_stack.push(_DeleteRowsCommand(self, rows, row_data))
 
     def _fill_addr_from_selection(self) -> None:
         """从选区第一个地址列单元格开始向下填充欧姆龙地址。"""

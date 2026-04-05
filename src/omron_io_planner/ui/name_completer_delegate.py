@@ -98,23 +98,36 @@ class NameCompleterDelegate(QStyledItemDelegate):
         completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
         completer.setWidget(edit)
         popup = completer.popup()
-        popup.setAlternatingRowColors(True)
+        popup.setAlternatingRowColors(False)
         popup.setMouseTracking(True)
         popup.setStyleSheet(
             "QListView {"
             " background-color: #FFFFFF;"
-            " alternate-background-color: #EEF2FF;"
             " border: 1px solid #C8CDD8;"
             " outline: none;"
             " padding: 2px;"
             "}"
             "QListView::item {"
+            " background-color: #FFFFFF;"
             " padding: 4px 8px;"
             " color: #1E2235;"
             "}"
+            "QListView::item:alternate {"
+            " background-color: #FFFFFF;"
+            "}"
             "QListView::item:selected {"
-            " background-color: #DCE7FF;"
-            " color: #1E2235;"
+            " background-color: #355F8C;"
+            " color: #FFFFFF;"
+            " border: 1px solid #355F8C;"
+            " border-radius: 3px;"
+            " font-weight: 600;"
+            "}"
+            "QListView::item:selected:!active {"
+            " background-color: #355F8C;"
+            " color: #FFFFFF;"
+            " border: 1px solid #355F8C;"
+            " border-radius: 3px;"
+            " font-weight: 600;"
             "}"
         )
         completer.activated[str].connect(lambda value, current=edit: self._apply_completion(current, value))

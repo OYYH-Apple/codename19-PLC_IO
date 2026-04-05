@@ -110,11 +110,11 @@ class ZoneInfoPanel(QWidget):
 
         # 内容
         html = (
-            _row_html("📌 地址示例", zone.prefix_example, "#5A6A9A")
-            + _row_html("🔧 主要用途", zone.main_usage, "#5A6A9A")
-            + _row_html("🔋 掉电保持", zone.retention, "#5A6A9A")
-            + _row_html("🔑 访问方式", zone.access_modes, "#5A6A9A")
-            + _row_html("📦 典型容量", zone.capacity, "#5A6A9A")
+            _row_html("地址示例", zone.prefix_example, "#5A6A9A")
+            + _row_html("主要用途", zone.main_usage, "#5A6A9A")
+            + _row_html("掉电保持", zone.retention, "#5A6A9A")
+            + _row_html("访问方式", zone.access_modes, "#5A6A9A")
+            + _row_html("典型容量", zone.capacity, "#5A6A9A")
         )
         self._content_label.setText(html)
 

@@ -6,25 +6,25 @@ from __future__ import annotations
 
 # ─── 颜色令牌 ───────────────────────────────────────────────────────────────
 _C = {
-    "bg_window":      "#F5F6FA",
+    "bg_window":      "#F2F5F9",
     "bg_widget":      "#FFFFFF",
-    "bg_alt_row":     "#EEF2FF",   # 交替行浅蓝
-    "bg_header":      "#3A3F5C",   # 深蓝紫表头
-    "bg_header_hover":"#4A5070",
+    "bg_alt_row":     "#F5F8FF",
+    "bg_header":      "#25364F",
+    "bg_header_hover":"#31455F",
     "bg_groupbox":    "#FFFFFF",
-    "bg_toolbar":     "#2D3250",   # 深蓝工具栏
-    "bg_tab":         "#DDE2F0",
+    "bg_toolbar":     "#213147",
+    "bg_tab":         "#E6ECF6",
     "bg_tab_sel":     "#FFFFFF",
-    "bg_btn":         "#4A6FA5",   # 主操作按钮蓝
-    "bg_btn_hover":   "#5A7FC0",
-    "bg_btn_pressed": "#3A5F95",
+    "bg_btn":         "#355F8C",
+    "bg_btn_hover":   "#4272A7",
+    "bg_btn_pressed": "#2B5078",
     "bg_btn_danger":  "#C0392B",
     "bg_btn_danger_h":"#E74C3C",
     "bg_input":       "#FFFFFF",
-    "bg_sel":         "#4A6FA5",
-    "bg_sel_unfocus": "#BFC9DD",
-    "border":         "#C8CDD8",
-    "border_focus":   "#4A6FA5",
+    "bg_sel":         "#355F8C",
+    "bg_sel_unfocus": "#D8E3F3",
+    "border":         "#D5DCEA",
+    "border_focus":   "#3D6C9E",
     "fg_text":        "#1E2235",
     "fg_header":      "#FFFFFF",
     "fg_btn":         "#FFFFFF",
@@ -32,10 +32,10 @@ _C = {
     "fg_placeholder": "#A0A8C0",
     "fg_tab":         "#4A5070",
     "fg_tab_sel":     "#2D3250",
-    "accent":         "#4A6FA5",
+    "accent":         "#2F668F",
     "shadow":         "rgba(0,0,0,0.08)",
-    "radius":         "6px",
-    "radius_sm":      "4px",
+    "radius":         "10px",
+    "radius_sm":      "8px",
 }
 
 
@@ -150,6 +150,47 @@ QGroupBox::title {{
     font-weight: bold;
 }}
 
+/* ── 侧栏条目 ───────────────────────────────────────────────────── */
+#recentProjectItemWidget {{
+    background: transparent;
+    border: 1px solid #D7E1F0;
+    border-radius: 12px;
+}}
+#recentProjectItemWidget[activeProject="true"] {{
+    background: transparent;
+    border-color: #91B1E2;
+}}
+#recentProjectItemWidget[pinnedProject="true"] {{
+    border-color: #B8CAE6;
+}}
+#recentProjectItemWidget[missingProject="true"] {{
+    background: transparent;
+    border-color: #E6C0B8;
+}}
+#recentProjectItemTextBox {{
+    background: transparent;
+}}
+#recentProjectItemActionsBox {{
+    background: transparent;
+}}
+#recentProjectItemTitle {{
+    color: {C['fg_text']};
+    font-size: 10pt;
+    font-weight: 700;
+    background: transparent;
+}}
+#recentProjectItemPath {{
+    color: #5A6481;
+    font-size: 8.5pt;
+    background: transparent;
+}}
+#recentProjectItemMeta {{
+    color: #56617B;
+    font-size: 8pt;
+    font-weight: 600;
+    background: transparent;
+}}
+
 /* ── 输入框 ────────────────────────────────────────────────────── */
 QLineEdit {{
     background-color: {C['bg_input']};
@@ -183,16 +224,16 @@ QPlainTextEdit:focus {{
 QPushButton {{
     background-color: {C['bg_btn']};
     color: {C['fg_btn']};
-    border: none;
+    border: 1px solid transparent;
     border-radius: {C['radius_sm']};
-    padding: 5px 14px;
-    font-weight: 500;
+    padding: 6px 14px;
+    font-weight: 600;
     min-width: 72px;
 }}
 QPushButton[compact="true"] {{
     min-width: 0;
-    padding: 5px 10px;
-    font-size: 10pt;
+    padding: 6px 12px;
+    font-size: 9pt;
 }}
 QPushButton:hover {{
     background-color: {C['bg_btn_hover']};
@@ -213,6 +254,54 @@ QPushButton[danger="true"] {{
 QPushButton[danger="true"]:hover {{
     background-color: {C['bg_btn_danger_h']};
 }}
+QToolButton#recentProjectActionButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {C['radius_sm']};
+    padding: 3px;
+}}
+QToolButton#recentProjectActionButton:hover {{
+    background-color: #EAF1FB;
+    border-color: #C8D7EE;
+}}
+QToolButton#recentProjectActionButton:checked {{
+    background-color: {C['bg_btn']};
+    border-color: {C['bg_btn']};
+}}
+QToolButton#recentProjectActionButton[danger="true"]:hover {{
+    background-color: #FCECE9;
+    border-color: #E6B7B0;
+}}
+QToolButton#recentProjectActionButton[danger="true"]:checked {{
+    background-color: #F7D8D4;
+    border-color: #DFA49C;
+}}
+#projectMetaActionsRow {{
+    background: transparent;
+}}
+#projectMetaCopyPanel {{
+    background-color: #F8FBFF;
+    border: 1px solid #D8E3F4;
+    border-radius: {C['radius']};
+}}
+#projectMetaCopyTitle {{
+    color: #244C7B;
+    font-size: 8.5pt;
+    font-weight: 700;
+    background: transparent;
+}}
+#projectMetaCopyButtons {{
+    background: transparent;
+}}
+#projectMetaCopyButtons QPushButton[compact="true"] {{
+    min-width: 96px;
+}}
+#tabCornerActions {{
+    background: transparent;
+}}
+#tabCornerActions QPushButton[compact="true"] {{
+    min-width: 112px;
+}}
 
 /* ── 沉浸模式条 ───────────────────────────────────────────────────── */
 #immersiveFocusBar {{
@@ -228,7 +317,58 @@ QPushButton[danger="true"]:hover {{
     font-weight: 600;
 }}
 #editorToolsBar {{
+    background: #FFFFFF;
+    border: 1px solid #D8E2F0;
+    border-radius: 12px;
+}}
+#editorToolsHeader {{
     background: transparent;
+}}
+#editorToolsBadge {{
+    color: #244C7B;
+    background-color: #E9F0FB;
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+#editorToolsSummary {{
+    color: #5F6A82;
+    background: transparent;
+    font-size: 9pt;
+}}
+#editorToolsButtonsRow {{
+    background: transparent;
+}}
+#editorToolsButtonsRow QPushButton[compact="true"] {{
+    min-width: 88px;
+}}
+#batchEditHint {{
+    color: #667189;
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-size: 8.5pt;
+}}
+#batchEditGuideButton {{
+    background-color: #EDF3FB;
+    border-color: #D3E0F1;
+    color: #244C7B;
+    font-weight: 700;
+}}
+#validationHeader {{
+    background: transparent;
+}}
+#validationSummaryLabel {{
+    color: #5A6080;
+    font-size: 9pt;
+    background: transparent;
+}}
+#validationBody {{
+    background: transparent;
+}}
+#validationBody QListWidget {{
+    border-radius: 8px;
 }}
 
 /* ── TabWidget ─────────────────────────────────────────────────── */
@@ -324,10 +464,27 @@ QListWidget::item:hover {{
     background-color: {C['bg_sel_unfocus']};
 }}
 #recentProjectsGroup {{
-    min-width: 220px;
+    min-width: 240px;
+}}
+#recentProjectsFilterRow {{
+    background: transparent;
+}}
+#recentProjectsList {{
+    background: transparent;
+    border: none;
 }}
 #recentProjectsList::item {{
-    min-height: 26px;
+    min-height: 88px;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+}}
+#recentProjectsList::item:selected {{
+    background: transparent;
+    color: {C['fg_text']};
+}}
+#recentProjectsList::item:hover {{
+    background: transparent;
 }}
 
 /* ── 下拉框 ────────────────────────────────────────────────────── */
