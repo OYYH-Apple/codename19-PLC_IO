@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-qt>=4.4"]
+dev = ["build>=1.0", "pytest>=7", "pytest-qt>=4.4", "wheel>=0.45"]
 
 [project.scripts]
 omron-io-planner = "omron_io_planner.app:main"
@@ -24,6 +24,9 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.package-data]
+"omron_io_planner.ui" = ["assets/icons/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
