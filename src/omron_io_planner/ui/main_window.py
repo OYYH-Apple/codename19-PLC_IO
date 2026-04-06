@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import time
 from pathlib import Path
@@ -521,6 +522,30 @@ class MainWindow(QMainWindow):
             self._resize_watch_ids.add(widget_id)
             widget.installEventFilter(self)
             widget.setMouseTracking(True)
+
+    @contextmanager
+    def _suspend_visible_updates(self):
+        widgets: list[tuple[QWidget, bool]] = []
+        seen_ids: set[int] = set()
+        for widget in (self, self.centralWidget(), self._tabs):
+            if widget is None:
+                continue
+            widget_id = id(widget)
+            if widget_id in seen_ids:
+                continue
+            seen_ids.add(widget_id)
+            widgets.append((widget, widget.updatesEnabled()))
+
+        for widget, _enabled in widgets:
+            widget.setUpdatesEnabled(False)
+
+        try:
+            yield
+        finally:
+            for widget, enabled in reversed(widgets):
+                widget.setUpdatesEnabled(enabled)
+            for widget, _enabled in widgets:
+                widget.update()
 
     def _resize_edges_for_pos(self, pos: QPoint):
         if self.isMaximized() or self.isFullScreen():
@@ -1525,39 +1550,40 @@ class MainWindow(QMainWindow):
     # ── Tab 管理 ──────────────────────────────────────────────────────────
 
     def _rebuild_tabs(self, select_index: int = 0) -> None:
-        self._building_tabs = True
-        self._flush_all_channel_tables()
-        assert self._tabs is not None
-        while self._tabs.count():
-            self._tabs.removeTab(0)
-        self._channel_tables.clear()
-        self._editor_focus_bars.clear()
-        self._editor_side_panels.clear()
-        self._editor_filter_edits.clear()
-        self._editor_filled_toggles.clear()
+        with self._suspend_visible_updates():
+            self._building_tabs = True
+            self._flush_all_channel_tables()
+            assert self._tabs is not None
+            while self._tabs.count():
+                self._tabs.removeTab(0)
+            self._channel_tables.clear()
+            self._editor_focus_bars.clear()
+            self._editor_side_panels.clear()
+            self._editor_filter_edits.clear()
+            self._editor_filled_toggles.clear()
 
-        self._tabs.addTab(self._build_preview_tab(), PREVIEW_LABEL)
+            self._tabs.addTab(self._build_preview_tab(), PREVIEW_LABEL)
 
-        for ch in self._project.channels:
-            w, tbl = self._make_channel_editor(ch.zone_id)
-            self._channel_tables.append(tbl)
-            self._load_table_from_points(tbl, ch.points)
-            tab_idx = self._tabs.addTab(w, ch.name)
-            self._color_tab(tab_idx, ch.zone_id)
+            for ch in self._project.channels:
+                w, tbl = self._make_channel_editor(ch.zone_id)
+                self._channel_tables.append(tbl)
+                self._load_table_from_points(tbl, ch.points)
+                tab_idx = self._tabs.addTab(w, ch.name)
+                self._color_tab(tab_idx, ch.zone_id)
 
-        self._sync_preview_channel_list()
-        self._building_tabs = False
-        self._preview_dirty = True
-        self._prev_tab_index = None
-        idx = self._apply_project_workspace_state(select_index)
-        idx = max(0, min(idx, self._tabs.count() - 1))
-        self._tabs.setCurrentIndex(idx)
-        self._prev_tab_index = idx
-        self._sync_channel_action_buttons()
-        if idx == 0:
-            self._ensure_preview_fresh()
-        self._refresh_validation_panel()
-        self._install_resize_watchers(self)
+            self._sync_preview_channel_list()
+            self._building_tabs = False
+            self._preview_dirty = True
+            self._prev_tab_index = None
+            idx = self._apply_project_workspace_state(select_index)
+            idx = max(0, min(idx, self._tabs.count() - 1))
+            self._tabs.setCurrentIndex(idx)
+            self._prev_tab_index = idx
+            self._sync_channel_action_buttons()
+            if idx == 0:
+                self._ensure_preview_fresh()
+            self._refresh_validation_panel()
+            self._install_resize_watchers(self)
 
     def _sync_channel_action_buttons(self) -> None:
         if self._tabs is None:

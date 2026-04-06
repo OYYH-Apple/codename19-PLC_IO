@@ -826,6 +826,85 @@ def test_open_recent_uses_status_loading_feedback_without_popup(qtbot, monkeypat
     assert window._loading_popup is None or not window._loading_popup.isVisible()
 
 
+def test_suspend_visible_updates_disables_visible_rebuild_subtree_and_restores_after(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window.show()
+    QApplication.processEvents()
+
+    central = window.centralWidget()
+    tabs = window._tabs
+
+    assert central is not None
+    assert tabs is not None
+    assert window.updatesEnabled() is True
+    assert central.updatesEnabled() is True
+    assert tabs.updatesEnabled() is True
+
+    seen: list[tuple[bool, bool, bool]] = []
+
+    with window._suspend_visible_updates():
+        seen.append((window.updatesEnabled(), central.updatesEnabled(), tabs.updatesEnabled()))
+
+    assert seen == [(False, False, False)]
+    assert window.updatesEnabled() is True
+    assert central.updatesEnabled() is True
+    assert tabs.updatesEnabled() is True
+
+
+def test_suspend_visible_updates_restores_after_exception(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window.show()
+    QApplication.processEvents()
+
+    central = window.centralWidget()
+    tabs = window._tabs
+
+    assert central is not None
+    assert tabs is not None
+
+    raised = False
+    try:
+        with window._suspend_visible_updates():
+            assert window.updatesEnabled() is False
+            assert central.updatesEnabled() is False
+            assert tabs.updatesEnabled() is False
+            raise RuntimeError("boom")
+    except RuntimeError:
+        raised = True
+
+    assert raised is True
+    assert window.updatesEnabled() is True
+    assert central.updatesEnabled() is True
+    assert tabs.updatesEnabled() is True
+
+
+def test_rebuild_tabs_runs_inside_visual_update_suspension(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    calls: list[str] = []
+
+    class _Guard:
+        def __enter__(self):
+            calls.append("enter")
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append("exit")
+            return False
+
+    monkeypatch.setattr(window, "_suspend_visible_updates", lambda: _Guard())
+
+    window._project = IoProject(
+        name="demo",
+        channels=[IoChannel("CIO 区", [IoPoint(name="X", data_type="BOOL", address="0.00", comment="")], zone_id="CIO")],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+
+    window._rebuild_tabs(select_index=1)
+
+    assert calls == ["enter", "exit"]
+
+
 def test_load_project_auto_generated_name_marks_window_modified_and_shows_summary(qtbot, monkeypatch, tmp_path) -> None:
     project_path = tmp_path / "legacy.json"
     project_path.write_text("{}", encoding="utf-8")
