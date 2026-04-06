@@ -410,6 +410,7 @@ class MainWindow(QMainWindow):
         self._preview_actions: QWidget | None = None
         self._preview_row_links: list[tuple[int, int]] = []
         self._preview_dirty = False
+        self._sidebar: QWidget | None = None
         self._recent_group: QGroupBox | None = None
         self._recent_projects_list: QListWidget | None = None
         self._recent_filter_edit: QLineEdit | None = None
@@ -771,11 +772,36 @@ class MainWindow(QMainWindow):
         root.setSpacing(12)
         root.setContentsMargins(10, 8, 10, 6)
 
+        sidebar = QWidget(central)
+        sidebar.setObjectName("mainSidebar")
+        sidebar.setMinimumWidth(240)
+        sidebar.setMaximumWidth(300)
+        self._sidebar = sidebar
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setSpacing(12)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(sidebar, 0)
+
+        meta = QGroupBox("项目信息")
+        meta.setObjectName("projectMetaGroup")
+        self._project_meta_group = meta
+        form = QFormLayout(meta)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(6)
+
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("项目名称")
+        self._plc_edit = QLineEdit()
+        self._plc_edit.setText(self._project.plc_prefix)
+        self._plc_edit.setPlaceholderText("未命名符号前缀（如 PLC）")
+        self._plc_edit.setToolTip("用于给未命名 IO 点生成默认符号名，例如 PLC_SYM_0001。已命名点不会受影响。")
+        form.addRow("项目名称", self._name_edit)
+        form.addRow("符号前缀", self._plc_edit)
+        sidebar_layout.addWidget(meta, 0)
+
         recent_group = QGroupBox("最近项目")
         self._recent_group = recent_group
         recent_group.setObjectName("recentProjectsGroup")
-        recent_group.setMaximumWidth(300)
-        recent_group.setMinimumWidth(240)
         recent_layout = QVBoxLayout(recent_group)
         recent_layout.setContentsMargins(10, 12, 10, 10)
         recent_layout.setSpacing(8)
@@ -815,8 +841,7 @@ class MainWindow(QMainWindow):
         self._recent_projects_list.itemActivated.connect(self._on_recent_project_activated)
         self._recent_projects_list.itemClicked.connect(self._on_recent_project_clicked)
         recent_layout.addWidget(self._recent_projects_list, 1)
-
-        root.addWidget(recent_group, 0)
+        sidebar_layout.addWidget(recent_group, 1)
 
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -824,29 +849,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         root.addWidget(content, 1)
 
-        # ── 项目元信息 ──────────────────────────────────────────────────────
-        meta = QGroupBox("项目信息")
-        self._project_meta_group = meta
-        form = QFormLayout(meta)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(6)
-
-        self._name_edit = QLineEdit()
-        self._name_edit.setPlaceholderText("项目名称")
-        self._plc_edit = QLineEdit()
-        self._plc_edit.setText(self._project.plc_prefix)
-        self._plc_edit.setPlaceholderText("未命名符号前缀（如 PLC）")
-        self._plc_edit.setToolTip("用于给未命名 IO 点生成默认符号名，例如 PLC_SYM_0001。已命名点不会受影响。")
-        form.addRow("项目名称", self._name_edit)
-        form.addRow("符号前缀", self._plc_edit)
-
-        project_actions_row = QWidget(meta)
-        project_actions_row.setObjectName("projectMetaActionsRow")
-        project_actions_layout = QHBoxLayout(project_actions_row)
-        project_actions_layout.setContentsMargins(0, 4, 0, 0)
-        project_actions_layout.setSpacing(12)
-
-        copy_group = QWidget(project_actions_row)
+        copy_group = QWidget(content)
         copy_group.setObjectName("projectMetaCopyPanel")
         self._copy_group = copy_group
         copy_layout = QVBoxLayout(copy_group)
@@ -869,9 +872,7 @@ class MainWindow(QMainWindow):
             copy_h.addWidget(btn, 0)
         copy_h.addStretch(1)
         copy_layout.addWidget(copy_buttons_row)
-        project_actions_layout.addWidget(copy_group, 1)
-        form.addRow(project_actions_row)
-        layout.addWidget(meta)
+        layout.addWidget(copy_group, 0)
 
         # ── Tab 区 ─────────────────────────────────────────────────────────
         self._tabs = QTabWidget()
@@ -1803,6 +1804,8 @@ class MainWindow(QMainWindow):
             self._immersive_action.blockSignals(False)
         self._sync_immersive_corner_button()
         startup_prefs = get_prefs().startup_preferences() if hasattr(get_prefs(), "startup_preferences") else {}
+        if self._sidebar is not None:
+            self._sidebar.setHidden(enabled)
         for widget in (self._project_meta_group, self._copy_group, self._toolbar):
             if widget is not None:
                 widget.setHidden(enabled)

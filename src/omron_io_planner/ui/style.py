@@ -276,6 +276,12 @@ QToolButton#recentProjectActionButton[danger="true"]:checked {{
     background-color: #F7D8D4;
     border-color: #DFA49C;
 }}
+#mainSidebar {{
+    background: transparent;
+}}
+#projectMetaGroup {{
+    min-width: 240px;
+}}
 #projectMetaActionsRow {{
     background: transparent;
 }}

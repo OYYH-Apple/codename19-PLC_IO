@@ -576,10 +576,13 @@ def test_preview_table_comment_column_clamps_and_shrinks_with_shorter_content(qt
 def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     table = window._channel_tables[0]
+    sidebar = window._project_meta_group.parentWidget()
 
     assert window._btn_enter_immersive is not None
     assert not window._btn_enter_immersive.isHidden()
     assert window._btn_enter_immersive.text() == "进入沉浸"
+    assert sidebar is not None
+    assert not sidebar.isHidden()
     assert not window._recent_group.isHidden()
     assert not window._project_meta_group.isHidden()
     assert not window._copy_group.isHidden()
@@ -591,6 +594,7 @@ def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatc
     assert window._recent_group.isHidden()
     assert window._project_meta_group.isHidden()
     assert window._copy_group.isHidden()
+    assert sidebar.isHidden()
     assert not window._btn_enter_immersive.isHidden()
     assert window._btn_enter_immersive.text() == "退出沉浸"
     assert not window._editor_focus_bars[table].isHidden()
@@ -1232,12 +1236,27 @@ def test_sidebar_action_buttons_fit_within_available_width(qtbot, monkeypatch) -
     assert recent_item.sizeHint().height() >= 88
 
 
-def test_copy_group_is_embedded_in_project_meta_group(qtbot, monkeypatch) -> None:
+def test_copy_group_is_separate_from_project_meta_group(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
 
     assert window._copy_group is not None
     assert window._project_meta_group is not None
-    assert window._project_meta_group.isAncestorOf(window._copy_group)
+    assert not window._project_meta_group.isAncestorOf(window._copy_group)
+
+
+def test_project_meta_group_sits_above_recent_group_in_sidebar(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+
+    assert window._project_meta_group is not None
+    assert window._recent_group is not None
+    sidebar = window._project_meta_group.parentWidget()
+
+    assert sidebar is not None
+    assert sidebar is window._recent_group.parentWidget()
+
+    sidebar_layout = sidebar.layout()
+    assert sidebar_layout is not None
+    assert sidebar_layout.indexOf(window._project_meta_group) < sidebar_layout.indexOf(window._recent_group)
 
 
 def test_channel_management_buttons_live_in_tab_corner_widget(qtbot, monkeypatch) -> None:
