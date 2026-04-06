@@ -45,15 +45,15 @@ def test_close_event_clears_autosave_when_project_is_clean(qtbot, monkeypatch) -
     cleared: list[bool] = []
     monkeypatch.setattr("omron_io_planner.ui.main_window.autosave_exists", lambda: False)
     monkeypatch.setattr("omron_io_planner.ui.main_window.clear_autosave", lambda: cleared.append(True))
-    window = MainWindow()
-    window._autosave_timer.stop()
-    qtbot.addWidget(window)
+    window = _make_window(qtbot, monkeypatch)
 
     event = QCloseEvent()
     window.closeEvent(event)
 
     assert event.isAccepted()
     assert cleared == [True]
+    window.deleteLater()
+    QApplication.processEvents()
 
 
 def test_clear_recovery_record_shows_success_feedback(qtbot, monkeypatch) -> None:
@@ -422,6 +422,26 @@ def test_save_json_success_shows_success_toast(qtbot, monkeypatch, tmp_path) -> 
     assert seen
     assert seen[-1][0] == "保存成功"
     assert seen[-1][2] == "success"
+
+
+def test_copy_buttons_show_success_toast(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(window, "_show_toast", lambda title, text, kind="info": seen.append((title, text, kind)))
+
+    actions = [
+        (window._btn_copy_io, ("IO 表", "已复制当前视图的 IO 表到剪贴板", "success")),
+        (window._btn_copy_sym, ("符号表", "已复制当前视图的符号表到剪贴板", "success")),
+        (window._btn_copy_d, ("D 区 CHANNEL", "已复制当前视图的 D 区 CHANNEL 到剪贴板", "success")),
+        (window._btn_copy_cio, ("CIO 字 CHANNEL", "已复制当前视图的 CIO 字 CHANNEL 到剪贴板", "success")),
+        (window._btn_copy_all, ("合并全部分区", "已复制全部分区合并文本到剪贴板", "success")),
+    ]
+
+    for button, expected in actions:
+        assert button is not None
+        button.click()
+
+    assert seen == [expected for _button, expected in actions]
 
 
 def test_save_json_failure_uses_save_failure_prompt(qtbot, monkeypatch, tmp_path) -> None:

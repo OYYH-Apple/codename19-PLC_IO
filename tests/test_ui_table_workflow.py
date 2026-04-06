@@ -137,12 +137,24 @@ def test_table_default_column_widths_match_editor_layout(qtbot) -> None:
     qtbot.addWidget(table)
     header = table.horizontalHeader()
 
-    assert table.columnWidth(table.COL_NAME) == 60
+    assert table.columnWidth(table.COL_NAME) == 220
     assert table.columnWidth(table.COL_DTYPE) == 100
     assert table.columnWidth(table.COL_ADDR) == 96
     assert table.columnWidth(table.COL_RACK) == 100
     assert table.columnWidth(table.COL_USAGE) == 78
     assert header.sectionResizeMode(table.COL_COMMENT) == header.ResizeMode.Stretch
+
+
+def test_saved_name_column_width_overrides_default(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+
+    widths = [table.columnWidth(col) for col in range(table.columnCount())]
+    widths[table.COL_NAME] = 104
+
+    table.apply_layout_state({"widths": widths})
+
+    assert table.columnWidth(table.COL_NAME) == 104
 
 
 def test_single_value_paste_fills_selected_block(qtbot) -> None:
@@ -189,7 +201,7 @@ def test_single_column_paste_repeats_across_selected_columns(qtbot) -> None:
         table.item(row, col).text()
         for row in range(2)
         for col in range(3)
-    ] == ["A", "A", "A", "B", "B", "B"]
+    ] == ["IO_待分配_待注释", "A", "A", "IO_待分配_待注释", "B", "B"]
 
 
 def test_single_cell_edit_uses_undo_redo(qtbot) -> None:
@@ -236,60 +248,64 @@ def test_duplicate_selected_rows_copies_row_content(qtbot) -> None:
     table = IoTableWidget()
     qtbot.addWidget(table)
     _fill_table(table, 4)
-    table.item(0, table.COL_NAME).setText("sensor_a")
     table.item(0, table.COL_ADDR).setText("0.00")
+    table.item(0, table.COL_COMMENT).setText("sensor_a")
     table.selectRow(0)
 
     table.duplicate_selected_rows()
 
-    assert table.item(1, table.COL_NAME).text() == "sensor_a"
+    assert table.item(1, table.COL_NAME).text() == "IO_0.00_sensor_a"
     assert table.item(1, table.COL_ADDR).text() == "0.00"
 
 
 def test_duplicate_selected_rows_uses_undo_redo(qtbot) -> None:
     table = IoTableWidget()
     qtbot.addWidget(table)
-    table.item(0, table.COL_NAME).setText("row0")
-    table.item(1, table.COL_NAME).setText("row1")
+    table.item(0, table.COL_ADDR).setText("0.00")
+    table.item(0, table.COL_COMMENT).setText("row0")
+    table.item(1, table.COL_ADDR).setText("0.01")
+    table.item(1, table.COL_COMMENT).setText("row1")
     table.selectRow(0)
 
     table.duplicate_selected_rows()
 
-    assert table.item(0, table.COL_NAME).text() == "row0"
-    assert table.item(1, table.COL_NAME).text() == "row0"
-    assert table.item(2, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.00"
+    assert table.item(1, table.COL_ADDR).text() == "0.00"
+    assert table.item(2, table.COL_ADDR).text() == "0.01"
 
     table.undo()
 
-    assert table.item(0, table.COL_NAME).text() == "row0"
-    assert table.item(1, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.00"
+    assert table.item(1, table.COL_ADDR).text() == "0.01"
 
     table.redo()
 
-    assert table.item(0, table.COL_NAME).text() == "row0"
-    assert table.item(1, table.COL_NAME).text() == "row0"
-    assert table.item(2, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.00"
+    assert table.item(1, table.COL_ADDR).text() == "0.00"
+    assert table.item(2, table.COL_ADDR).text() == "0.01"
 
 
 def test_delete_selected_rows_uses_undo_redo(qtbot) -> None:
     table = IoTableWidget()
     qtbot.addWidget(table)
-    table.item(0, table.COL_NAME).setText("row0")
-    table.item(1, table.COL_NAME).setText("row1")
+    table.item(0, table.COL_ADDR).setText("0.00")
+    table.item(0, table.COL_COMMENT).setText("row0")
+    table.item(1, table.COL_ADDR).setText("0.01")
+    table.item(1, table.COL_COMMENT).setText("row1")
     table.selectRow(0)
 
     table._delete_selected_rows()
 
-    assert table.item(0, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.01"
 
     table.undo()
 
-    assert table.item(0, table.COL_NAME).text() == "row0"
-    assert table.item(1, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.00"
+    assert table.item(1, table.COL_ADDR).text() == "0.01"
 
     table.redo()
 
-    assert table.item(0, table.COL_NAME).text() == "row1"
+    assert table.item(0, table.COL_ADDR).text() == "0.01"
 
 
 def test_fill_down_increments_trailing_numbers(qtbot) -> None:
@@ -477,10 +493,93 @@ def test_preview_sidebar_is_placed_left_of_preview_table(qtbot, monkeypatch) -> 
     assert window._preview_sidebar is not window._preview_table.parentWidget()
 
 
+def test_preview_table_autosizes_name_and_comment_columns_for_longest_content(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("A", [IoPoint(name="短", data_type="BOOL", address="0.00", comment="短注释")]),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=0)
+    QApplication.processEvents()
+
+    preview = window._preview_table
+    assert preview is not None
+    short_name_width = preview.columnWidth(1)
+    short_comment_width = preview.columnWidth(4)
+
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "A",
+                [
+                    IoPoint(
+                        name="很长的名称用于验证全通道预览列宽会根据最长内容自动扩展",
+                        data_type="BOOL",
+                        address="0.00",
+                        comment="这是一条明显更长的注释内容，用来验证预览表会在刷新后自动拉宽注释列",
+                    )
+                ],
+            ),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=0)
+    QApplication.processEvents()
+
+    preview = window._preview_table
+    assert preview is not None
+    assert preview.columnWidth(1) > short_name_width
+    assert preview.columnWidth(4) > short_comment_width
+
+
+def test_preview_table_comment_column_clamps_and_shrinks_with_shorter_content(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    long_comment = "超长注释内容" * 80
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("A", [IoPoint(name="A", data_type="BOOL", address="0.00", comment=long_comment)]),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=0)
+    QApplication.processEvents()
+
+    preview = window._preview_table
+    assert preview is not None
+    long_comment_width = preview.columnWidth(4)
+    assert long_comment_width <= 420
+
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("A", [IoPoint(name="A", data_type="BOOL", address="0.00", comment="短注释")]),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=0)
+    QApplication.processEvents()
+
+    preview = window._preview_table
+    assert preview is not None
+    assert preview.columnWidth(4) < long_comment_width
+
+
 def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     table = window._channel_tables[0]
 
+    assert window._btn_enter_immersive is not None
+    assert not window._btn_enter_immersive.isHidden()
+    assert window._btn_enter_immersive.text() == "进入沉浸"
     assert not window._recent_group.isHidden()
     assert not window._project_meta_group.isHidden()
     assert not window._copy_group.isHidden()
@@ -492,6 +591,8 @@ def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatc
     assert window._recent_group.isHidden()
     assert window._project_meta_group.isHidden()
     assert window._copy_group.isHidden()
+    assert not window._btn_enter_immersive.isHidden()
+    assert window._btn_enter_immersive.text() == "退出沉浸"
     assert not window._editor_focus_bars[table].isHidden()
     assert window._editor_side_panels[table].isHidden()
 
@@ -555,7 +656,7 @@ def test_immersive_focus_bar_uses_separate_action_row_and_preserves_button_width
     assert all(btn.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Ignored for btn in buttons)
 
 
-def test_immersive_focus_bar_provides_exit_button(qtbot, monkeypatch) -> None:
+def test_immersive_focus_bar_does_not_provide_exit_button(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     table = window._channel_tables[0]
     window._set_immersive_mode(True)
@@ -565,12 +666,36 @@ def test_immersive_focus_bar_provides_exit_button(qtbot, monkeypatch) -> None:
         None,
     )
 
-    assert exit_button is not None
+    assert exit_button is None
 
-    exit_button.click()
+
+def test_tab_corner_immersive_button_enters_immersive_mode(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+
+    assert window._btn_enter_immersive is not None
+    assert not window._immersive_mode
+
+    qtbot.mouseClick(window._btn_enter_immersive, Qt.MouseButton.LeftButton)
+
+    assert window._immersive_mode
+    assert window._btn_enter_immersive.text() == "退出沉浸"
+    assert not window._editor_focus_bars[table].isHidden()
+
+
+def test_tab_corner_immersive_button_toggles_back_after_exit(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+
+    assert window._btn_enter_immersive is not None
+
+    qtbot.mouseClick(window._btn_enter_immersive, Qt.MouseButton.LeftButton)
+    assert window._btn_enter_immersive.text() == "退出沉浸"
+
+    qtbot.mouseClick(window._btn_enter_immersive, Qt.MouseButton.LeftButton)
 
     assert not window._immersive_mode
-    assert focus_bar.isHidden()
+    assert not window._btn_enter_immersive.isHidden()
+    assert window._btn_enter_immersive.text() == "进入沉浸"
 
 
 def test_recent_projects_sidebar_lists_and_opens_recent_files(qtbot, monkeypatch, tmp_path) -> None:
@@ -699,6 +824,35 @@ def test_open_recent_uses_status_loading_feedback_without_popup(qtbot, monkeypat
 
     assert seen == [(f"正在加载 {project_a.name}...", str(project_a.resolve()), True)]
     assert window._loading_popup is None or not window._loading_popup.isVisible()
+
+
+def test_load_project_auto_generated_name_marks_window_modified_and_shows_summary(qtbot, monkeypatch, tmp_path) -> None:
+    project_path = tmp_path / "legacy.json"
+    project_path.write_text("{}", encoding="utf-8")
+    window = _make_window(qtbot, monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr(
+        "omron_io_planner.ui.main_window.load_project_json",
+        lambda path: IoProject(
+            name="demo",
+            channels=[
+                IoChannel(
+                    "CIO 区",
+                    [IoPoint(name="旧名称", data_type="BOOL", address="0.01", comment="阻挡气缸伸出")],
+                    zone_id="CIO",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(window, "_show_toast", lambda title, text, kind="info": seen.append((title, text, kind)))
+
+    window._do_open_json(str(project_path))
+
+    assert window._project.channels[0].points[0].name == "CIO_0.01_阻挡气缸伸出"
+    assert window._channel_tables[0].item(0, window._channel_tables[0].COL_NAME).text() == "CIO_0.01_阻挡气缸伸出"
+    assert window._modified is True
+    assert seen == [("自动名称", "已自动更新 1 个名称", "info")]
 
 
 def test_recent_projects_sidebar_filters_items(qtbot, monkeypatch, tmp_path) -> None:
@@ -1014,8 +1168,10 @@ def test_channel_management_buttons_live_in_tab_corner_widget(qtbot, monkeypatch
     corner = window._tabs.cornerWidget(Qt.Corner.TopRightCorner)
 
     assert corner is not None
+    assert corner.isAncestorOf(window._btn_enter_immersive)
     assert corner.isAncestorOf(window._btn_add_ch)
     assert corner.isAncestorOf(window._btn_del_ch)
+    assert not window._project_meta_group.isAncestorOf(window._btn_enter_immersive)
     assert not window._project_meta_group.isAncestorOf(window._btn_add_ch)
     assert not window._project_meta_group.isAncestorOf(window._btn_del_ch)
 
@@ -1538,6 +1694,7 @@ def test_continuous_entry_seeds_next_row_from_previous_values(qtbot) -> None:
     table = IoTableWidget()
     qtbot.addWidget(table)
     _fill_table(table, 3)
+    table.set_zone_id("CIO")
     table.set_editor_defaults(
         {
             "continuous_entry": True,
@@ -1559,12 +1716,193 @@ def test_continuous_entry_seeds_next_row_from_previous_values(qtbot) -> None:
 
     table._navigate(1, 0)
 
-    assert table.item(1, table.COL_NAME).text() == "X02"
+    assert table.item(1, table.COL_NAME).text() == "CIO_0.01_阻挡气缸伸出2"
     assert table.item(1, table.COL_ADDR).text() == "0.01"
     assert table.item(1, table.COL_COMMENT).text() == "阻挡气缸伸出2"
     assert table.item(1, table.COL_DTYPE).text() == "BOOL"
     assert table.item(1, table.COL_RACK).text() == "R1"
     assert table.item(1, table.COL_USAGE).text() == "输入"
+
+
+def _prepare_continuous_entry_chain(table: IoTableWidget, *, rows: int = 4) -> None:
+    _fill_table(table, rows)
+    table.set_zone_id("CIO")
+    table.set_editor_defaults(
+        {
+            "continuous_entry": True,
+            "auto_increment_address": True,
+            "inherit_data_type": True,
+            "inherit_rack": True,
+            "inherit_usage": True,
+            "auto_increment_name": True,
+            "auto_increment_comment": True,
+        }
+    )
+    table.item(0, table.COL_NAME).setText("X01")
+    table.item(0, table.COL_DTYPE).setText("BOOL")
+    table.item(0, table.COL_ADDR).setText("0.00")
+    table.item(0, table.COL_COMMENT).setText("中专1")
+    table.item(0, table.COL_RACK).setText("R1")
+    table.item(0, table.COL_USAGE).setText("输入")
+    table.setCurrentCell(0, table.COL_NAME)
+    table._navigate(1, 0)
+    table._navigate(1, 0)
+
+
+def test_continuous_entry_reflows_auto_filled_segment_after_source_edit(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    assert table.item(1, table.COL_COMMENT).text() == "中专2"
+    assert table.item(2, table.COL_COMMENT).text() == "中专3"
+
+    table.commit_editor_text(0, table.COL_COMMENT, "中转1")
+
+    assert table.item(1, table.COL_COMMENT).text() == "中转2"
+    assert table.item(2, table.COL_COMMENT).text() == "中转3"
+    assert table.item(1, table.COL_NAME).text() == "CIO_0.01_中转2"
+    assert table.item(2, table.COL_NAME).text() == "CIO_0.02_中转3"
+
+
+def test_continuous_entry_stops_reflow_at_first_manually_edited_row(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    table.commit_editor_text(1, table.COL_COMMENT, "人工确认2")
+    table.commit_editor_text(0, table.COL_COMMENT, "中转1")
+
+    assert table.item(1, table.COL_COMMENT).text() == "人工确认2"
+    assert table.item(1, table.COL_NAME).text() == "CIO_0.01_人工确认2"
+    assert table.item(2, table.COL_COMMENT).text() == "人工确认3"
+    assert table.item(2, table.COL_NAME).text() == "CIO_0.02_人工确认3"
+
+
+def test_continuous_entry_clears_auto_filled_segment_when_source_loses_pattern(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    table.commit_editor_text(0, table.COL_COMMENT, "人工文本")
+
+    assert table.item(1, table.COL_COMMENT).text() == ""
+    assert table.item(2, table.COL_COMMENT).text() == ""
+    assert table.item(1, table.COL_NAME).text() == "CIO_0.01_待注释"
+    assert table.item(2, table.COL_NAME).text() == "CIO_0.02_待注释"
+
+
+def test_duplicate_rows_do_not_inherit_continuous_entry_auto_state(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    table.setCurrentCell(1, table.COL_COMMENT)
+    table.selectRow(1)
+    table.duplicate_selected_rows()
+    table.commit_editor_text(0, table.COL_COMMENT, "中转1")
+
+    assert table.item(1, table.COL_COMMENT).text() == "中转2"
+    assert table.item(2, table.COL_COMMENT).text() == "中专2"
+    assert table.item(3, table.COL_COMMENT).text() == "中专3"
+
+
+def test_sorting_preserves_continuous_entry_auto_state(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    table._sort_rows_by_address(Qt.SortOrder.AscendingOrder)
+    table.commit_editor_text(0, table.COL_COMMENT, "中转1")
+
+    assert table.item(1, table.COL_COMMENT).text() == "中转2"
+    assert table.item(2, table.COL_COMMENT).text() == "中转3"
+
+
+def test_delete_undo_preserves_continuous_entry_auto_state(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _prepare_continuous_entry_chain(table)
+
+    table.setCurrentCell(1, table.COL_COMMENT)
+    table.selectRow(1)
+    table._delete_selected_rows()
+    table.undo()
+    table.commit_editor_text(0, table.COL_COMMENT, "中转1")
+
+    assert table.item(1, table.COL_COMMENT).text() == "中转2"
+    assert table.item(2, table.COL_COMMENT).text() == "中转3"
+
+
+def test_auto_generated_name_updates_from_address_and_comment(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 2)
+    table.set_zone_id("CIO")
+
+    table.commit_editor_text(0, table.COL_ADDR, "0.01")
+    table.commit_editor_text(0, table.COL_COMMENT, "阻挡气缸伸出")
+
+    assert table.item(0, table.COL_NAME).text() == "CIO_0.01_阻挡气缸伸出"
+
+
+def test_auto_generated_name_overwrites_manual_name_on_next_source_change(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 2)
+    table.set_zone_id("CIO")
+    table.commit_editor_text(0, table.COL_ADDR, "0.01")
+    table.commit_editor_text(0, table.COL_COMMENT, "阻挡气缸伸出")
+    table.commit_editor_text(0, table.COL_NAME, "手动修改名称")
+
+    table.commit_editor_text(0, table.COL_COMMENT, "阻挡气缸缩回")
+
+    assert table.item(0, table.COL_NAME).text() == "CIO_0.01_阻挡气缸缩回"
+
+
+def test_auto_generated_name_marks_flash_then_attention_and_clears_on_selection(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 2)
+    table.set_zone_id("CIO")
+
+    table.commit_editor_text(0, table.COL_ADDR, "0.01")
+    table.commit_editor_text(0, table.COL_COMMENT, "阻挡气缸伸出")
+
+    name_item = table.item(0, table.COL_NAME)
+    assert bool(name_item.data(table.ROLE_AUTO_NAME_FLASH))
+    assert bool(name_item.data(table.ROLE_AUTO_NAME_ATTENTION))
+
+    qtbot.wait(table.AUTO_NAME_FLASH_DURATION_MS + 50)
+
+    assert not bool(name_item.data(table.ROLE_AUTO_NAME_FLASH))
+    assert bool(name_item.data(table.ROLE_AUTO_NAME_ATTENTION))
+
+    table.setCurrentCell(0, table.COL_NAME)
+    QApplication.processEvents()
+
+    assert not bool(name_item.data(table.ROLE_AUTO_NAME_ATTENTION))
+
+
+def test_auto_generated_name_recomputes_after_batch_changes(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 3)
+    table.set_zone_id("WR")
+
+    table.apply_multi_changes(
+        [
+            (0, table.COL_ADDR, "", "10.00"),
+            (0, table.COL_COMMENT, "", "顶升气缸伸出"),
+            (1, table.COL_ADDR, "", "10.01"),
+            (1, table.COL_COMMENT, "", ""),
+        ],
+        "批量生成",
+        "generate",
+    )
+
+    assert table.item(0, table.COL_NAME).text() == "W_10.00_顶升气缸伸出"
+    assert table.item(1, table.COL_NAME).text() == "W_10.01_待注释"
 
 
 def test_batch_generate_rows_creates_address_sequence_and_updates_project(qtbot, monkeypatch) -> None:
@@ -1584,8 +1922,8 @@ def test_batch_generate_rows_creates_address_sequence_and_updates_project(qtbot,
         },
     )
 
-    assert table.item(0, table.COL_NAME).text() == "X01"
-    assert table.item(1, table.COL_NAME).text() == "X02"
+    assert table.item(0, table.COL_NAME).text() == "CIO_0.10_阻挡气缸伸出到位"
+    assert table.item(1, table.COL_NAME).text() == "CIO_0.11_阻挡气缸缩回到位"
     assert table.item(0, table.COL_ADDR).text() == "0.10"
     assert table.item(2, table.COL_ADDR).text() == "0.12"
     assert table.item(0, table.COL_COMMENT).text() == "阻挡气缸伸出到位"
@@ -1694,7 +2032,7 @@ def test_workspace_state_restores_preview_order_filters_and_immersive_mode(qtbot
     assert table.columnWidth(table.COL_ADDR) == 104
 
 
-def test_validation_collects_core_issues(qtbot, monkeypatch) -> None:
+def test_validation_collects_core_issues_without_cross_zone_duplicate_address(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     window._project = IoProject(
         name="demo",
@@ -1711,11 +2049,89 @@ def test_validation_collects_core_issues(qtbot, monkeypatch) -> None:
     issues = window._collect_validation_issues()
 
     codes = {issue["code"] for issue in issues}
-    assert {"duplicate_address", "invalid_data_type", "empty_preview"} <= codes
+    assert {"invalid_data_type", "empty_preview"} <= codes
+    assert "duplicate_address" not in codes
     assert "missing_name" not in codes
     assert window._validation_group is not None
     assert window._validation_header is not None
     assert window._validation_body is not None
+
+
+def test_validation_collects_duplicate_address_within_same_zone(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "WR 区",
+                [
+                    IoPoint(name="W_0.00_A", data_type="BOOL", address="0.00", comment=""),
+                    IoPoint(name="W_0.00_B", data_type="BOOL", address="0.00", comment=""),
+                ],
+                zone_id="WR",
+            ),
+        ],
+    )
+
+    issues = window._collect_validation_issues()
+
+    duplicate_addresses = [issue for issue in issues if issue["code"] == "duplicate_address"]
+    assert len(duplicate_addresses) == 1
+    assert duplicate_addresses[0]["message"] == "WR 区 / 第 2 行地址重复：0.00"
+
+
+def test_validation_does_not_collect_duplicate_address_across_custom_channels(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("自定义A", [IoPoint(name="A", data_type="BOOL", address="0.00", comment="")]),
+            IoChannel("自定义B", [IoPoint(name="B", data_type="BOOL", address="0.00", comment="")]),
+        ],
+    )
+
+    issues = window._collect_validation_issues()
+
+    assert "duplicate_address" not in {issue["code"] for issue in issues}
+
+
+def test_validation_collects_duplicate_address_within_same_custom_channel(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "自定义A",
+                [
+                    IoPoint(name="A", data_type="BOOL", address="0.00", comment=""),
+                    IoPoint(name="B", data_type="BOOL", address="0.00", comment=""),
+                ],
+            ),
+            IoChannel("自定义B", [IoPoint(name="C", data_type="BOOL", address="0.00", comment="")]),
+        ],
+    )
+
+    issues = window._collect_validation_issues()
+
+    duplicate_addresses = [issue for issue in issues if issue["code"] == "duplicate_address"]
+    assert len(duplicate_addresses) == 1
+    assert duplicate_addresses[0]["message"] == "自定义A / 第 2 行地址重复：0.00"
+
+
+def test_validation_collects_duplicate_name_issue(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("CIO 区", [IoPoint(name="CIO_0.00_阻挡气缸伸出", data_type="BOOL", address="0.00", comment="伸出")], zone_id="CIO"),
+            IoChannel("WR 区", [IoPoint(name="CIO_0.00_阻挡气缸伸出", data_type="BOOL", address="10.00", comment="缩回")], zone_id="WR"),
+        ],
+    )
+
+    issues = window._collect_validation_issues()
+    window._refresh_validation_panel()
+
+    assert "duplicate_name" in {issue["code"] for issue in issues}
     assert window._validation_toggle_btn is not None
     assert window._validation_summary_label is not None
     assert window._validation_body.isHidden()

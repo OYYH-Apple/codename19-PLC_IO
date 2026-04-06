@@ -46,6 +46,7 @@ from ..export import (
     stitched_points,
     tsv_from_rows,
 )
+from ..auto_name import normalize_project_auto_names
 from ..io_excel import import_flat_table, import_io_sheet, save_project_excel
 from ..models import IoChannel, IoPoint, IoProject
 from ..omron_symbol_types import combo_items
@@ -91,6 +92,16 @@ COL_USAGE   = IoTableWidget.COL_USAGE
 
 PREVIEW_LABEL = "全通道预览"
 LEGACY_PREVIEW_LABEL = "📊 全通道预览"
+_PREVIEW_TABLE_HEADERS = ["分区", "名称", "数据类型", "地址/值", "注释", "机架位置", "使用"]
+_PREVIEW_COLUMN_WIDTH_LIMITS = {
+    0: (84, 140),
+    1: (120, 320),
+    2: (96, 140),
+    3: (96, 150),
+    4: (120, 420),
+    5: (96, 220),
+    6: (96, 260),
+}
 
 _APP_TITLE = "欧姆龙 IO 分配助手"
 _VALID_DATA_TYPES = set(combo_items())
@@ -419,6 +430,7 @@ class MainWindow(QMainWindow):
         self._loading_popup: LoadingPopup | None = None
         self._immersive_mode = False
         self._immersive_action: QAction | None = None
+        self._btn_enter_immersive: QPushButton | None = None
         self._editor_focus_bars: dict[IoTableWidget, QWidget] = {}
         self._editor_side_panels: dict[IoTableWidget, QWidget] = {}
         self._editor_filter_edits: dict[IoTableWidget, QLineEdit] = {}
@@ -846,6 +858,12 @@ class MainWindow(QMainWindow):
         tab_corner_layout = QHBoxLayout(tab_corner_actions)
         tab_corner_layout.setContentsMargins(0, 0, 0, 0)
         tab_corner_layout.setSpacing(8)
+        self._btn_enter_immersive = _make_action_btn(
+            "进入沉浸",
+            "聚焦当前分区编辑画布",
+            compact=True,
+            icon_name="focus-light",
+        )
         self._btn_add_ch = _make_action_btn(
             "添加分区",
             "从标准欧姆龙分区列表选择，或添加自定义通道",
@@ -859,6 +877,7 @@ class MainWindow(QMainWindow):
             compact=True,
             icon_name="trash-light",
         )
+        tab_corner_layout.addWidget(self._btn_enter_immersive, 0)
         tab_corner_layout.addWidget(self._btn_add_ch, 0)
         tab_corner_layout.addWidget(self._btn_del_ch, 0)
         self._tabs.setCornerWidget(tab_corner_actions, Qt.Corner.TopRightCorner)
@@ -878,7 +897,7 @@ class MainWindow(QMainWindow):
         validation_header_layout = QHBoxLayout(validation_header)
         validation_header_layout.setContentsMargins(0, 0, 0, 0)
         validation_header_layout.setSpacing(8)
-        validation_title = QLabel("仅提示核心错误；双击问题可直接定位。")
+        validation_title = QLabel("仅提示核心错误；地址重复按同一分区/通道判断，双击问题可直接定位。")
         validation_title.setWordWrap(True)
         validation_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         validation_header_layout.addWidget(validation_title, 1)
@@ -906,6 +925,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(validation_group)
 
         # 连接
+        self._btn_enter_immersive.clicked.connect(lambda: self._set_immersive_mode(not self._immersive_mode))
         self._btn_add_ch.clicked.connect(self._add_channel)
         self._btn_del_ch.clicked.connect(self._delete_current_channel)
         self._btn_copy_io.clicked.connect(self._copy_io)
@@ -915,6 +935,7 @@ class MainWindow(QMainWindow):
         self._btn_copy_all.clicked.connect(self._copy_combined)
         self._name_edit.textChanged.connect(self._on_meta_changed)
         self._plc_edit.textChanged.connect(self._on_meta_changed)
+        self._sync_immersive_corner_button()
         self._sync_channel_action_buttons()
 
     # ── 预览 Tab ───────────────────────────────────────────────────────────
@@ -963,10 +984,7 @@ class MainWindow(QMainWindow):
         side.addWidget(self._preview_actions)
 
         self._preview_table = QTableWidget(0, 7)
-        self._preview_table.setHorizontalHeaderLabels(
-            ["分区", "名称", "数据类型", "地址/值", "注释", "机架位置", "使用"]
-        )
-        self._preview_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self._preview_table.setHorizontalHeaderLabels(_PREVIEW_TABLE_HEADERS)
         self._preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._preview_table.setAlternatingRowColors(True)
         self._preview_table.itemDoubleClicked.connect(self._on_preview_item_double_clicked)
@@ -1033,6 +1051,18 @@ class MainWindow(QMainWindow):
                 names.append(it.text())
         return names
 
+    def _autosize_preview_columns(self) -> None:
+        if not self._preview_table:
+            return
+        table = self._preview_table
+        header = table.horizontalHeader()
+        for col in range(table.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            table.resizeColumnToContents(col)
+            measured = max(table.columnWidth(col), header.sectionSizeHint(col)) + 18
+            min_width, max_width = _PREVIEW_COLUMN_WIDTH_LIMITS.get(col, (96, 260))
+            table.setColumnWidth(col, max(min_width, min(max_width, measured)))
+
     def _refresh_preview_table(self) -> None:
         if self._building_tabs or not self._preview_table:
             return
@@ -1061,6 +1091,7 @@ class MainWindow(QMainWindow):
                 for col, value in enumerate(values):
                     self._preview_table.setItem(row, col, QTableWidgetItem(str(value)))
                 self._preview_row_links.append((channel_index, point_index))
+        self._autosize_preview_columns()
 
     def _schedule_preview_refresh(self, immediate: bool = False) -> None:
         if self._building_tabs:
@@ -1085,12 +1116,33 @@ class MainWindow(QMainWindow):
 
     def _collect_validation_issues(self) -> list[dict[str, object]]:
         issues: list[dict[str, object]] = []
-        seen_addresses: dict[str, tuple[int, int]] = {}
+        # 地址重复只在同一分区/通道命名空间内检查：
+        # - 标准分区按 zone_id 隔离
+        # - 自定义通道按当前 channel_index 隔离
+        seen_addresses: dict[tuple[str, str], tuple[int, int]] = {}
+        seen_names: dict[str, tuple[int, int]] = {}
         for channel_index, channel in enumerate(self._project.channels):
+            zone_id = channel.zone_id.strip()
+            address_scope = f"zone:{zone_id}" if zone_id else f"channel:{channel_index}"
             for row_index, point in enumerate(channel.points):
+                name = point.name.strip()
+                if name:
+                    prior_name = seen_names.get(name)
+                    if prior_name is not None:
+                        issues.append(
+                            {
+                                "code": "duplicate_name",
+                                "message": f"{channel.name} / 第 {row_index + 1} 行名称重复：{name}",
+                                "channel_index": channel_index,
+                                "row_index": row_index,
+                            }
+                        )
+                    else:
+                        seen_names[name] = (channel_index, row_index)
                 address = point.address.strip()
                 if address:
-                    prior = seen_addresses.get(address)
+                    address_key = (address_scope, address)
+                    prior = seen_addresses.get(address_key)
                     if prior is not None:
                         issues.append(
                             {
@@ -1101,7 +1153,7 @@ class MainWindow(QMainWindow):
                             }
                         )
                     else:
-                        seen_addresses[address] = (channel_index, row_index)
+                        seen_addresses[address_key] = (channel_index, row_index)
                 if point.data_type.strip().upper() not in _VALID_DATA_TYPES:
                     issues.append(
                         {
@@ -1217,6 +1269,7 @@ class MainWindow(QMainWindow):
         outer_h.setSpacing(12)
 
         table = IoTableWidget()
+        table.set_zone_id(zone_id)
         table.setItemDelegateForColumn(COL_DTYPE, DataTypeDelegate(table))
         table.setItemDelegateForColumn(COL_NAME, NameCompleterDelegate(table, table))
         table.setItemDelegateForColumn(COL_COMMENT, NameCompleterDelegate(table, table, source_column=COL_COMMENT))
@@ -1324,17 +1377,14 @@ class MainWindow(QMainWindow):
         btn_insert_below = _make_immersive_btn("下插", icon_name="add-light")
         btn_duplicate = _make_immersive_btn("复制选中", icon_name="clipboard-light")
         btn_delete_rows = _make_immersive_btn("删除选中", danger=True, icon_name="trash-light")
-        btn_exit_immersive = _make_immersive_btn("退出沉浸")
         btn_clear_filter.clicked.connect(lambda: filter_edit.clear())
         btn_insert_above.clicked.connect(lambda: self._insert_row_in(table, below=False))
         btn_insert_below.clicked.connect(lambda: self._insert_row_in(table, below=True))
         btn_duplicate.clicked.connect(lambda: self._duplicate_rows_in(table))
         btn_delete_rows.clicked.connect(lambda: self._del_rows_in(table))
-        btn_exit_immersive.clicked.connect(lambda: self._set_immersive_mode(False))
         for button in (btn_clear_filter, btn_insert_above, btn_insert_below, btn_duplicate, btn_delete_rows):
             action_layout.addWidget(button, 0)
         action_layout.addStretch(1)
-        action_layout.addWidget(btn_exit_immersive, 0)
         focus_layout.addWidget(action_row, 0)
 
         table_shell_layout.addWidget(tools_bar, 0)
@@ -1514,6 +1564,8 @@ class MainWindow(QMainWindow):
             return
         current_index = self._tabs.currentIndex()
         can_delete = current_index > 0 and len(self._project.channels) > 1
+        if self._btn_enter_immersive is not None:
+            self._btn_enter_immersive.setEnabled(True)
         self._btn_add_ch.setEnabled(True)
         self._btn_del_ch.setEnabled(can_delete)
         if current_index <= 0:
@@ -1706,6 +1758,16 @@ class MainWindow(QMainWindow):
         editor.setFocus()
         editor.selectAll()
 
+    def _sync_immersive_corner_button(self) -> None:
+        if self._btn_enter_immersive is None:
+            return
+        if self._immersive_mode:
+            self._btn_enter_immersive.setText("退出沉浸")
+            self._btn_enter_immersive.setToolTip("退出沉浸模式，返回标准编辑界面")
+        else:
+            self._btn_enter_immersive.setText("进入沉浸")
+            self._btn_enter_immersive.setToolTip("聚焦当前分区编辑画布")
+
     def _set_immersive_mode(self, enabled: bool) -> None:
         enabled = bool(enabled)
         self._immersive_mode = enabled
@@ -1713,6 +1775,7 @@ class MainWindow(QMainWindow):
             self._immersive_action.blockSignals(True)
             self._immersive_action.setChecked(enabled)
             self._immersive_action.blockSignals(False)
+        self._sync_immersive_corner_button()
         startup_prefs = get_prefs().startup_preferences() if hasattr(get_prefs(), "startup_preferences") else {}
         for widget in (self._project_meta_group, self._copy_group, self._toolbar):
             if widget is not None:
@@ -2306,7 +2369,7 @@ class MainWindow(QMainWindow):
             rows = rows_io_preview_stitched(self._project, self._selected_preview_channel_order())
         else:
             rows = rows_io_table_channel(self._project, self._tabs.currentIndex() - 1)
-        self._copy_tsv(rows)
+        self._copy_tsv("IO 表", "已复制当前视图的 IO 表到剪贴板", rows)
 
     def _copy_symbol(self) -> None:
         assert self._tabs is not None
@@ -2316,7 +2379,7 @@ class MainWindow(QMainWindow):
         else:
             ci = self._tabs.currentIndex() - 1
             pts = list(self._project.channels[ci].points)
-        self._copy_tsv(rows_symbol_table_for_points(self._project, pts))
+        self._copy_tsv("符号表", "已复制当前视图的符号表到剪贴板", rows_symbol_table_for_points(self._project, pts))
 
     def _copy_d(self) -> None:
         assert self._tabs is not None
@@ -2326,7 +2389,7 @@ class MainWindow(QMainWindow):
         else:
             ci = self._tabs.currentIndex() - 1
             pts = list(self._project.channels[ci].points)
-        self._copy_tsv(rows_d_channel_for_points(self._project, pts))
+        self._copy_tsv("D 区 CHANNEL", "已复制当前视图的 D 区 CHANNEL 到剪贴板", rows_d_channel_for_points(self._project, pts))
 
     def _copy_cio(self) -> None:
         assert self._tabs is not None
@@ -2336,16 +2399,19 @@ class MainWindow(QMainWindow):
         else:
             ci = self._tabs.currentIndex() - 1
             pts = list(self._project.channels[ci].points)
-        self._copy_tsv(rows_cio_word_index_for_points(self._project, pts))
+        self._copy_tsv("CIO 字 CHANNEL", "已复制当前视图的 CIO 字 CHANNEL 到剪贴板", rows_cio_word_index_for_points(self._project, pts))
 
-    def _copy_tsv(self, rows) -> None:
+    def _copy_tsv(self, title: str, status_text: str, rows) -> None:
         text = tsv_from_rows(rows)
         QApplication.clipboard().setText(text)
-        self.statusBar().showMessage("已复制 TSV 到剪贴板", 3000)
+        self.statusBar().showMessage(status_text, 3000)
+        self._show_toast(title, status_text, "success")
 
     def _copy_combined(self) -> None:
         QApplication.clipboard().setText(combined_export_text(self._project))
-        self.statusBar().showMessage("已复制合并文本（全部分区）到剪贴板", 3000)
+        status_text = "已复制全部分区合并文本到剪贴板"
+        self.statusBar().showMessage(status_text, 3000)
+        self._show_toast("合并全部分区", status_text, "success")
 
     # ══════════════════════════════════════════════════════════════════════════
     # 文件操作
@@ -2397,6 +2463,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._dialog_error("错误", str(e))
             return
+        renamed_points = normalize_project_auto_names(self._project)
         # 清空表格引用，防止旧表格数据覆盖新加载的项目
         self._channel_tables.clear()
         prefs = get_prefs()
@@ -2407,9 +2474,14 @@ class MainWindow(QMainWindow):
         active_tab = self._project.workspace_state.get("active_tab", "") if isinstance(self._project.workspace_state, dict) else ""
         select_index = 0 if _is_preview_tab_label(str(active_tab)) else 1
         self._rebuild_tabs(select_index=select_index)
-        self._set_modified(False)
+        self._set_modified(renamed_points > 0)
         self._update_title()
-        self.statusBar().showMessage(f"已打开 {path}", 3000)
+        if renamed_points > 0:
+            message = f"已自动更新 {renamed_points} 个名称"
+            self.statusBar().showMessage(f"已打开 {path} · {message}", 5000)
+            self._show_toast("自动名称", message, "info")
+        else:
+            self.statusBar().showMessage(f"已打开 {path}", 3000)
 
     def _save_json(self) -> None:
         path = str(self._project_path) if self._project_path else ""

@@ -44,6 +44,7 @@ from PySide6.QtCore import (
     QPoint,
     QRect,
     QSize,
+    QTimer,
     Qt,
     Signal,
 )
@@ -70,6 +71,7 @@ from PySide6.QtWidgets import (
 )
 
 from .highlight_header_view import _HighlightHeaderView
+from ..auto_name import build_auto_name
 from ..addressing import format_cio_bit, parse_cio_bit
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -314,7 +316,7 @@ class _CellEditCommand(QUndoCommand):
         else:
             item.setText(text)
         self._table.blockSignals(False)
-        self._table._after_batch_change("edit", self._row)
+        self._table._finalize_applied_cells([(self._row, self._col)], "edit")
 
 
 class _MultiCellCommand(QUndoCommand):
@@ -349,8 +351,7 @@ class _MultiCellCommand(QUndoCommand):
             else:
                 item.setText(text)
         self._table.blockSignals(False)
-        max_row = max((row for row, *_ in self._changes), default=None)
-        self._table._after_batch_change(self._reason, max_row)
+        self._table._finalize_applied_cells([(row, col) for row, col, *_ in self._changes], self._reason)
 
 
 class _MoveRowsCommand(QUndoCommand):
@@ -548,6 +549,8 @@ _TAIL_BUFFER_ROWS = 20
 _TAIL_TRIGGER_ROWS = 10
 _CELL_BG = "#FFFFFF"
 _CELL_ALT_BG = "#EEF2FF"
+_AUTO_NAME_FLASH_BG = "#FFF1AE"
+_AUTO_NAME_ATTENTION_BG = "#FFF8D4"
 _TEXT_NUMBER_RE = re.compile(r"^(.*?)(\d+)(\D*)$")
 _TEMPLATE_NUMBER_RE = re.compile(r"\{(?:n|num)(?::(\d+))?\}")
 _TEMPLATE_ALT_RE = re.compile(r"\[([^\[\]\|]+)\|([^\[\]\|]+)\]")
@@ -720,11 +723,16 @@ class IoTableWidget(QTableWidget):
     COL_COMMENT = 3
     COL_RACK    = 4
     COL_USAGE   = 5
+    ROLE_AUTO_NAME_FLASH = int(Qt.ItemDataRole.UserRole) + 101
+    ROLE_AUTO_NAME_ATTENTION = int(Qt.ItemDataRole.UserRole) + 102
+    ROLE_CONTINUOUS_ENTRY_AUTO = int(Qt.ItemDataRole.UserRole) + 103
+    AUTO_NAME_FLASH_DURATION_MS = 220
 
     def __init__(self, parent=None) -> None:
         super().__init__(0, 6, parent)
         self._undo_stack = QUndoStack(self)
         self._ignore_change = False
+        self._zone_id = ""
         self._editor_defaults = {
             "continuous_entry": False,
             "enter_navigation": "down",
@@ -756,6 +764,9 @@ class IoTableWidget(QTableWidget):
 
         # 复制选区蚂蚁线（Ctrl+C 后显示虚线边框）
         self._copied_rect: tuple[int, int, int, int] | None = None
+        self._auto_name_guard = False
+        self._auto_name_flash_timers: list[QTimer] = []
+        self._continuous_entry_guard = False
 
         # Enter 记住的列（Excel 默认记住 Enter 触发时的列）
         self._enter_column: int | None = None
@@ -802,10 +813,11 @@ class IoTableWidget(QTableWidget):
         self.viewport().setMouseTracking(True)
 
         self.itemChanged.connect(self._on_item_changed)
+        self.currentCellChanged.connect(self._on_current_cell_changed)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
-        self.setColumnWidth(self.COL_NAME,   60)
+        self.setColumnWidth(self.COL_NAME,  220)
         self.setColumnWidth(self.COL_DTYPE, 100)
         self.setColumnWidth(self.COL_ADDR,   96)
         self.setColumnWidth(self.COL_RACK,  100)
@@ -814,6 +826,16 @@ class IoTableWidget(QTableWidget):
 
     def editor_defaults(self) -> dict[str, object]:
         return dict(self._editor_defaults)
+
+    def set_zone_id(self, zone_id: str) -> None:
+        zone_id = str(zone_id or "").strip().upper()
+        if self._zone_id == zone_id:
+            return
+        self._zone_id = zone_id
+        self.recompute_auto_names(highlight=False)
+
+    def zone_id(self) -> str:
+        return self._zone_id
 
     def set_editor_defaults(self, values: dict[str, object]) -> None:
         self._editor_defaults.update(values)
@@ -883,10 +905,280 @@ class IoTableWidget(QTableWidget):
     def _after_batch_change(self, reason: str, anchor_row: int | None = None) -> None:
         self._copied_rect = None
         self._ensure_spare_rows(anchor_row)
+        self._refresh_auto_name_backgrounds()
         self.viewport().update()
         self.contentDirty.emit(reason)
 
-    def _snapshot_row_data(self, row: int) -> list[dict]:
+    def _finalize_applied_cells(self, changed_cells: list[tuple[int, int]], reason: str) -> None:
+        valid_cells = [
+            (row, col)
+            for row, col in changed_cells
+            if 0 <= row < self.rowCount() and 0 <= col < self.columnCount()
+        ]
+        reflow_cells = self._apply_continuous_entry_effects(valid_cells, reason)
+        affected_cells = list(dict.fromkeys(valid_cells + reflow_cells))
+        if affected_cells:
+            self._apply_auto_name_effects(affected_cells)
+        anchor_row = max((row for row, _ in affected_cells), default=None)
+        self._after_batch_change(reason, anchor_row)
+
+    def _apply_continuous_entry_effects(
+        self,
+        changed_cells: list[tuple[int, int]],
+        reason: str,
+    ) -> list[tuple[int, int]]:
+        if not changed_cells:
+            return []
+
+        managed_columns = self._continuous_entry_columns()
+        continuous_cells = [(row, col) for row, col in changed_cells if col in managed_columns]
+        if not continuous_cells:
+            return []
+
+        if reason == "continuous_entry":
+            self._set_continuous_entry_auto_state(continuous_cells, True)
+            return []
+
+        if not bool(self._editor_defaults.get("continuous_entry")):
+            return []
+
+        self._set_continuous_entry_auto_state(continuous_cells, False)
+        return self._reflow_continuous_entry_segments(continuous_cells)
+
+    def _continuous_entry_columns(self) -> set[int]:
+        columns: set[int] = set()
+        if bool(self._editor_defaults.get("inherit_data_type")):
+            columns.add(self.COL_DTYPE)
+        if bool(self._editor_defaults.get("auto_increment_address")):
+            columns.add(self.COL_ADDR)
+        if bool(self._editor_defaults.get("auto_increment_name")):
+            columns.add(self.COL_NAME)
+        if bool(self._editor_defaults.get("auto_increment_comment")):
+            columns.add(self.COL_COMMENT)
+        if bool(self._editor_defaults.get("inherit_rack")):
+            columns.add(self.COL_RACK)
+        if bool(self._editor_defaults.get("inherit_usage")):
+            columns.add(self.COL_USAGE)
+        return columns
+
+    def _ensure_item(self, row: int, col: int) -> QTableWidgetItem:
+        item = self.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.setItem(row, col, item)
+        return item
+
+    def _mutate_table_items(self, callback) -> None:  # noqa: ANN001
+        was_blocked = self.signalsBlocked()
+        previous_auto_name_guard = self._auto_name_guard
+        previous_continuous_guard = self._continuous_entry_guard
+        self._auto_name_guard = True
+        self._continuous_entry_guard = True
+        if not was_blocked:
+            self.blockSignals(True)
+        try:
+            callback()
+        finally:
+            if not was_blocked:
+                self.blockSignals(False)
+            self._auto_name_guard = previous_auto_name_guard
+            self._continuous_entry_guard = previous_continuous_guard
+
+    def _set_continuous_entry_auto_state(
+        self,
+        cells: list[tuple[int, int]],
+        enabled: bool,
+    ) -> None:
+        if not cells:
+            return
+
+        def _apply() -> None:
+            value = True if enabled else None
+            for row, col in cells:
+                item = self._ensure_item(row, col)
+                item.setData(self.ROLE_CONTINUOUS_ENTRY_AUTO, value)
+
+        self._mutate_table_items(_apply)
+
+    def _reflow_continuous_entry_segments(self, changed_cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        changed_by_column: dict[int, list[int]] = {}
+        for row, col in changed_cells:
+            changed_by_column.setdefault(col, []).append(row)
+
+        reflowed: list[tuple[int, int]] = []
+        for col, rows in changed_by_column.items():
+            for source_row in sorted(set(rows)):
+                reflowed.extend(self._reflow_continuous_entry_column_from(source_row, col))
+        return reflowed
+
+    def _reflow_continuous_entry_column_from(self, source_row: int, col: int) -> list[tuple[int, int]]:
+        if source_row < 0 or source_row >= self.rowCount() - 1:
+            return []
+
+        changes: list[tuple[int, int]] = []
+
+        def _apply() -> None:
+            current_source = source_row
+            for row in range(source_row + 1, self.rowCount()):
+                item = self.item(row, col)
+                if item is None or not bool(item.data(self.ROLE_CONTINUOUS_ENTRY_AUTO)):
+                    break
+                new_text = self._next_continuous_entry_value(current_source, col) or ""
+                if item.text() != new_text:
+                    item.setText(new_text)
+                    changes.append((row, col))
+                current_source = row
+
+        self._mutate_table_items(_apply)
+        return changes
+
+    def _next_continuous_entry_value(self, source_row: int, col: int) -> str | None:
+        source_text = self._cell_text(source_row, col)
+        if col == self.COL_ADDR:
+            return _next_omron_bit(source_text) if source_text else None
+        if col in (self.COL_NAME, self.COL_COMMENT):
+            values = _build_text_fill_values([source_text], 1) if source_text else None
+            return values[0] if values else None
+        return source_text or None
+
+    def _apply_auto_name_effects(self, changed_cells: list[tuple[int, int]]) -> None:
+        if self._auto_name_guard:
+            return
+        rows_to_recompute = {row for row, col in changed_cells if col in (self.COL_ADDR, self.COL_COMMENT)}
+        rows_to_clear = {row for row, col in changed_cells if col == self.COL_NAME} - rows_to_recompute
+        if rows_to_recompute:
+            self.recompute_auto_names(rows_to_recompute, highlight=True)
+        for row in rows_to_clear:
+            self._clear_auto_name_highlight(row)
+
+    def recompute_auto_names(self, rows: list[int] | set[int] | tuple[int, ...] | None = None, *, highlight: bool) -> int:
+        target_rows = range(self.rowCount()) if rows is None else sorted({row for row in rows if 0 <= row < self.rowCount()})
+        changed = 0
+        for row in target_rows:
+            changed += int(self._recompute_auto_name_for_row(row, highlight=highlight))
+        return changed
+
+    def _recompute_auto_name_for_row(self, row: int, *, highlight: bool) -> bool:
+        if row < 0 or row >= self.rowCount():
+            return False
+        name_item = self.item(row, self.COL_NAME)
+        if name_item is None:
+            name_item = QTableWidgetItem("")
+            self.setItem(row, self.COL_NAME, name_item)
+        expected = self._derived_name_for_row(row)
+        current = name_item.text()
+        if current == expected:
+            if not expected:
+                self._clear_auto_name_highlight(row)
+            return False
+        self._auto_name_guard = True
+        self.blockSignals(True)
+        name_item.setText(expected)
+        self.blockSignals(False)
+        self._auto_name_guard = False
+        if expected and highlight:
+            self._mark_auto_name_updated(name_item)
+        else:
+            self._clear_auto_name_highlight(row)
+        return True
+
+    def _derived_name_for_row(self, row: int) -> str:
+        address = self._cell_text(row, self.COL_ADDR)
+        comment = self._cell_text(row, self.COL_COMMENT)
+        if not address and not comment:
+            return ""
+        return build_auto_name(self._zone_id, address, comment)
+
+    def _cell_text(self, row: int, col: int) -> str:
+        item = self.item(row, col)
+        return item.text().strip() if item else ""
+
+    def _mark_auto_name_updated(self, item: QTableWidgetItem) -> None:
+        row = self.row(item)
+        if row < 0:
+            return
+        self._mutate_auto_name_visuals(
+            lambda: (
+                item.setData(self.ROLE_AUTO_NAME_FLASH, True),
+                item.setData(self.ROLE_AUTO_NAME_ATTENTION, True),
+                self._update_auto_name_item_background(item, row),
+            )
+        )
+        self._schedule_auto_name_flash_clear(item)
+
+    def _clear_auto_name_flash(self, item: QTableWidgetItem) -> None:
+        try:
+            row = self.row(item)
+        except RuntimeError:
+            return
+        if row < 0:
+            return
+        if not bool(item.data(self.ROLE_AUTO_NAME_FLASH)):
+            return
+        self._mutate_auto_name_visuals(
+            lambda: (
+                item.setData(self.ROLE_AUTO_NAME_FLASH, False),
+                self._update_auto_name_item_background(item, row),
+            )
+        )
+        self.viewport().update()
+
+    def _clear_auto_name_highlight(self, row: int) -> None:
+        if row < 0 or row >= self.rowCount():
+            return
+        item = self.item(row, self.COL_NAME)
+        if item is None:
+            return
+        self._mutate_auto_name_visuals(
+            lambda: (
+                item.setData(self.ROLE_AUTO_NAME_FLASH, None),
+                item.setData(self.ROLE_AUTO_NAME_ATTENTION, None),
+                self._update_auto_name_item_background(item, row),
+            )
+        )
+        self.viewport().update()
+
+    def _refresh_auto_name_backgrounds(self) -> None:
+        self._mutate_auto_name_visuals(
+            lambda: [
+                self._update_auto_name_item_background(item, row)
+                for row in range(self.rowCount())
+                for item in [self.item(row, self.COL_NAME)]
+                if item is not None
+            ]
+        )
+
+    def _update_auto_name_item_background(self, item: QTableWidgetItem, row: int) -> None:
+        if bool(item.data(self.ROLE_AUTO_NAME_FLASH)):
+            color = _AUTO_NAME_FLASH_BG
+        elif bool(item.data(self.ROLE_AUTO_NAME_ATTENTION)):
+            color = _AUTO_NAME_ATTENTION_BG
+        else:
+            color = _cell_background_color(self, row)
+        item.setBackground(QColor(color))
+
+    def _mutate_auto_name_visuals(self, callback) -> None:  # noqa: ANN001
+        self._mutate_table_items(callback)
+
+    def _schedule_auto_name_flash_clear(self, item: QTableWidgetItem) -> None:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        self._auto_name_flash_timers.append(timer)
+
+        def _finish() -> None:
+            try:
+                self._clear_auto_name_flash(item)
+            except RuntimeError:
+                pass
+            finally:
+                if timer in self._auto_name_flash_timers:
+                    self._auto_name_flash_timers.remove(timer)
+                timer.deleteLater()
+
+        timer.timeout.connect(_finish)
+        timer.start(self.AUTO_NAME_FLASH_DURATION_MS)
+
+    def _snapshot_row_data(self, row: int, *, include_continuous_entry_auto: bool = True) -> list[dict]:
         data: list[dict] = []
         for col in range(self.columnCount()):
             item = self.item(row, col)
@@ -899,6 +1191,13 @@ class IoTableWidget(QTableWidget):
                     "flags": item.flags(),
                     "background": item.background(),
                     "foreground": item.foreground(),
+                    "auto_name_flash": item.data(self.ROLE_AUTO_NAME_FLASH),
+                    "auto_name_attention": item.data(self.ROLE_AUTO_NAME_ATTENTION),
+                    "continuous_entry_auto": (
+                        item.data(self.ROLE_CONTINUOUS_ENTRY_AUTO)
+                        if include_continuous_entry_auto
+                        else None
+                    ),
                 }
             )
         return data
@@ -914,6 +1213,9 @@ class IoTableWidget(QTableWidget):
                 item.setFlags(col_data["flags"])
                 item.setBackground(col_data["background"])
                 item.setForeground(col_data["foreground"])
+                item.setData(self.ROLE_AUTO_NAME_FLASH, col_data.get("auto_name_flash"))
+                item.setData(self.ROLE_AUTO_NAME_ATTENTION, col_data.get("auto_name_attention"))
+                item.setData(self.ROLE_CONTINUOUS_ENTRY_AUTO, col_data.get("continuous_entry_auto"))
             else:
                 item = self.item(row, col)
                 if item is None:
@@ -921,6 +1223,9 @@ class IoTableWidget(QTableWidget):
                     self.setItem(row, col, item)
                 else:
                     item.setText("")
+                item.setData(self.ROLE_AUTO_NAME_FLASH, None)
+                item.setData(self.ROLE_AUTO_NAME_ATTENTION, None)
+                item.setData(self.ROLE_CONTINUOUS_ENTRY_AUTO, None)
 
     def _row_has_visible_data(self, data: list[dict]) -> bool:
         return any(col_data and str(col_data.get("text", "")).strip() for col_data in data)
@@ -941,7 +1246,7 @@ class IoTableWidget(QTableWidget):
         if not rows:
             return
 
-        snapshots = [self._snapshot_row_data(row) for row in rows]
+        snapshots = [self._snapshot_row_data(row, include_continuous_entry_auto=False) for row in rows]
         insert_at = rows[-1] + 1
         self._undo_stack.push(
             _InsertRowsCommand(
@@ -1132,10 +1437,17 @@ class IoTableWidget(QTableWidget):
         self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
         QApplication.processEvents()
 
+    def _on_current_cell_changed(self, current_row: int, current_column: int, _previous_row: int, _previous_column: int) -> None:
+        if current_column == self.COL_NAME:
+            self._clear_auto_name_highlight(current_row)
+
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if not self._auto_name_guard:
+            self._apply_auto_name_effects([(item.row(), item.column())])
         # 清除复制选区的蚂蚁线（因为内容已变）
         self._copied_rect = None
         self._ensure_spare_rows(item.row())
+        self._refresh_auto_name_backgrounds()
         self.viewport().update()
         self.contentDirty.emit("edit")
 
