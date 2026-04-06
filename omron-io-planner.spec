@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src\\omron_io_planner\\app.py'],
+    ['app_launcher.py'],
     pathex=['src'],
     binaries=[],
     datas=[('src/omron_io_planner/ui/assets/icons', 'omron_io_planner/ui/assets/icons')],
