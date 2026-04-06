@@ -35,4 +35,4 @@ python -m omron_io_planner.app
 
 ## 版本
 
-0.4.1 — 修复 Windows 桌面发行包启动入口，补齐打包资源
+0.4.3 — 新增应用图标并更新 Windows 桌面发行包
