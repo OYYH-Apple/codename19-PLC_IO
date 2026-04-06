@@ -349,6 +349,9 @@ def test_app_main_starts_window_centered_with_default_geometry(monkeypatch) -> N
         def setApplicationName(self, name: str) -> None:
             self.name = name
 
+        def setWindowIcon(self, icon) -> None:  # noqa: ANN001
+            self.icon = icon
+
         def exec(self) -> int:
             shown.append("exec")
             return 0
@@ -364,6 +367,9 @@ def test_app_main_starts_window_centered_with_default_geometry(monkeypatch) -> N
         def __init__(self) -> None:
             self.width_value = 0
             self.height_value = 0
+
+        def setWindowIcon(self, icon) -> None:  # noqa: ANN001
+            self.icon = icon
 
         def resize(self, width: int, height: int) -> None:
             self.width_value = width
