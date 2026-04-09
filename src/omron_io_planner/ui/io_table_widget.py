@@ -34,6 +34,7 @@ Excel 风格的 IO 表格组件。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from typing import Optional
 
@@ -687,6 +688,46 @@ def _render_generation_template(template: str, index: int, address: str = "") ->
     return rendered
 
 
+@dataclass(frozen=True)
+class TableSearchMatch:
+    row: int
+    col: int
+    start: int
+    length: int
+
+
+def _match_positions(text: str, search_text: str, *, case_sensitive: bool) -> list[int]:
+    if not text or not search_text:
+        return []
+    haystack = text if case_sensitive else text.casefold()
+    needle = search_text if case_sensitive else search_text.casefold()
+    positions: list[int] = []
+    start = 0
+    step = max(1, len(needle))
+    while True:
+        idx = haystack.find(needle, start)
+        if idx < 0:
+            break
+        positions.append(idx)
+        start = idx + step
+    return positions
+
+
+def _replace_occurrences(text: str, search_text: str, replacement: str, *, case_sensitive: bool) -> tuple[str, int]:
+    positions = _match_positions(text, search_text, case_sensitive=case_sensitive)
+    if not positions:
+        return text, 0
+    parts: list[str] = []
+    cursor = 0
+    width = len(search_text)
+    for pos in positions:
+        parts.append(text[cursor:pos])
+        parts.append(replacement)
+        cursor = pos + width
+    parts.append(text[cursor:])
+    return "".join(parts), len(positions)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 主 Widget
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1238,6 +1279,224 @@ class IoTableWidget(QTableWidget):
             if item and item.text().strip():
                 return True
         return False
+
+    def _iter_search_matches(
+        self,
+        search_text: str,
+        *,
+        case_sensitive: bool = False,
+        visible_only: bool = True,
+        current_column_only: bool = False,
+        selected_only: bool = False,
+        base_column: int | None = None,
+    ) -> list[TableSearchMatch]:
+        query = str(search_text or "")
+        if not query:
+            return []
+        matches: list[TableSearchMatch] = []
+        for row, col in self._iter_search_scope_cells(
+            visible_only=visible_only,
+            current_column_only=current_column_only,
+            selected_only=selected_only,
+            base_column=base_column,
+        ):
+            item = self.item(row, col)
+            text = item.text() if item else ""
+            if not text:
+                continue
+            for start in _match_positions(text, query, case_sensitive=case_sensitive):
+                matches.append(TableSearchMatch(row, col, start, len(query)))
+        return matches
+
+    def _selected_search_cells(self) -> set[tuple[int, int]]:
+        selected = {(index.row(), index.column()) for index in self.selectedIndexes()}
+        if not selected and self.currentIndex().isValid():
+            selected = {(self.currentRow(), self.currentColumn())}
+        return selected
+
+    def _iter_search_scope_cells(
+        self,
+        *,
+        visible_only: bool,
+        current_column_only: bool,
+        selected_only: bool,
+        base_column: int | None,
+    ) -> list[tuple[int, int]]:
+        selected_cells = self._selected_search_cells() if selected_only else set()
+        scoped_column = base_column if base_column is not None else self.currentColumn()
+        if current_column_only and not (0 <= scoped_column < self.columnCount()):
+            return []
+        columns = [scoped_column] if current_column_only else list(range(self.columnCount()))
+        cells: list[tuple[int, int]] = []
+        for row in range(self.rowCount()):
+            if visible_only and self.isRowHidden(row):
+                continue
+            if not self.row_has_content(row):
+                continue
+            for col in columns:
+                if selected_only and (row, col) not in selected_cells:
+                    continue
+                cells.append((row, col))
+        return cells
+
+    def _cell_in_search_scope(
+        self,
+        row: int,
+        col: int,
+        *,
+        visible_only: bool,
+        current_column_only: bool,
+        selected_only: bool,
+        base_column: int | None,
+    ) -> bool:
+        if not (0 <= row < self.rowCount() and 0 <= col < self.columnCount()):
+            return False
+        if visible_only and self.isRowHidden(row):
+            return False
+        if current_column_only:
+            scoped_column = base_column if base_column is not None else self.currentColumn()
+            if col != scoped_column:
+                return False
+        if selected_only:
+            if (row, col) not in self._selected_search_cells():
+                return False
+        return True
+
+    def find_next_match(
+        self,
+        search_text: str,
+        *,
+        after: TableSearchMatch | None = None,
+        case_sensitive: bool = False,
+        visible_only: bool = True,
+        direction: str = "forward",
+        current_column_only: bool = False,
+        selected_only: bool = False,
+        base_column: int | None = None,
+    ) -> TableSearchMatch | None:
+        matches = self._iter_search_matches(
+            search_text,
+            case_sensitive=case_sensitive,
+            visible_only=visible_only,
+            current_column_only=current_column_only,
+            selected_only=selected_only,
+            base_column=base_column,
+        )
+        if not matches:
+            return None
+        direction = "backward" if str(direction or "").lower() == "backward" else "forward"
+        if after is not None:
+            anchor = (after.row, after.col, after.start)
+        else:
+            current = self.currentIndex()
+            if current.isValid():
+                anchor = (
+                    current.row(),
+                    current.column(),
+                    -1 if direction == "backward" else 10**9,
+                )
+            else:
+                anchor = (10**9, 10**9, 10**9) if direction == "backward" else (-1, -1, -1)
+        if direction == "backward":
+            for match in reversed(matches):
+                if (match.row, match.col, match.start) < anchor:
+                    return match
+            return matches[-1]
+        for match in matches:
+            if (match.row, match.col, match.start) > anchor:
+                return match
+        return matches[0]
+
+    def match_still_valid(
+        self,
+        match: TableSearchMatch | None,
+        search_text: str,
+        *,
+        case_sensitive: bool = False,
+        visible_only: bool = True,
+        current_column_only: bool = False,
+        selected_only: bool = False,
+        base_column: int | None = None,
+    ) -> bool:
+        if match is None:
+            return False
+        if not self._cell_in_search_scope(
+            match.row,
+            match.col,
+            visible_only=visible_only,
+            current_column_only=current_column_only,
+            selected_only=selected_only,
+            base_column=base_column,
+        ):
+            return False
+        item = self.item(match.row, match.col)
+        text = item.text() if item else ""
+        if not text or match.start < 0:
+            return False
+        end = match.start + len(search_text)
+        if end > len(text):
+            return False
+        segment = text[match.start:end]
+        return segment == search_text if case_sensitive else segment.casefold() == search_text.casefold()
+
+    def activate_search_match(self, match: TableSearchMatch, *, preserve_selection: bool = False) -> None:
+        if not (0 <= match.row < self.rowCount() and 0 <= match.col < self.columnCount()):
+            return
+        index = self.model().index(match.row, match.col)
+        flags = (
+            QItemSelectionModel.SelectionFlag.NoUpdate
+            if preserve_selection
+            else QItemSelectionModel.SelectionFlag.ClearAndSelect
+        )
+        self.selectionModel().setCurrentIndex(index, flags)
+        item = self.item(match.row, match.col)
+        if item is not None:
+            self.scrollToItem(item)
+
+    def replace_match(self, match: TableSearchMatch, replacement: str) -> bool:
+        if not (0 <= match.row < self.rowCount() and 0 <= match.col < self.columnCount()):
+            return False
+        item = self.item(match.row, match.col)
+        text = item.text() if item else ""
+        if match.start < 0 or match.start + match.length > len(text):
+            return False
+        new_text = text[:match.start] + replacement + text[match.start + match.length:]
+        self._apply_cell_edit(match.row, match.col, new_text)
+        return True
+
+    def replace_all_matches(
+        self,
+        search_text: str,
+        replacement: str,
+        *,
+        case_sensitive: bool = False,
+        visible_only: bool = True,
+        current_column_only: bool = False,
+        selected_only: bool = False,
+        base_column: int | None = None,
+    ) -> int:
+        query = str(search_text or "")
+        if not query:
+            return 0
+        changes: list[tuple[int, int, str, str]] = []
+        count = 0
+        for row, col in self._iter_search_scope_cells(
+            visible_only=visible_only,
+            current_column_only=current_column_only,
+            selected_only=selected_only,
+            base_column=base_column,
+        ):
+            item = self.item(row, col)
+            old = item.text() if item else ""
+            if not old:
+                continue
+            new, replaced = _replace_occurrences(old, query, replacement, case_sensitive=case_sensitive)
+            if replaced and old != new:
+                changes.append((row, col, old, new))
+                count += replaced
+        if changes:
+            self.apply_multi_changes(changes, "替换全部", "replace_all")
+        return count
 
     def duplicate_selected_rows(self) -> None:
         rows = sorted({index.row() for index in self.selectedIndexes()})
@@ -1827,6 +2086,17 @@ class IoTableWidget(QTableWidget):
             idx = self.currentIndex()
             if idx.isValid():
                 self.editItem(self.item(idx.row(), idx.column()))
+            return
+
+        window = self.window()
+        if ctrl and shift and key == Qt.Key.Key_F and hasattr(window, "_focus_current_editor_filter"):
+            window._focus_current_editor_filter()
+            return
+        if ctrl and key == Qt.Key.Key_F and hasattr(window, "_open_find_dialog"):
+            window._open_find_dialog()
+            return
+        if ctrl and key == Qt.Key.Key_H and hasattr(window, "_open_replace_dialog"):
+            window._open_replace_dialog()
             return
 
         if alt and key == Qt.Key.Key_Down:

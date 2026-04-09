@@ -646,6 +646,268 @@ def test_focus_current_immersive_filter_targets_active_table(qtbot, monkeypatch)
     assert calls == ["focus", "select"]
 
 
+def test_find_next_match_wraps_from_current_cell(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    table.item(0, table.COL_USAGE).setText("输入")
+    table.item(1, table.COL_USAGE).setText("仅此一次")
+    table.item(2, table.COL_USAGE).setText("输出")
+    table.setCurrentCell(3, table.COL_USAGE)
+
+    match = table.find_next_match("仅此")
+
+    assert match is not None
+    assert (match.row, match.col, match.start, match.length) == (1, table.COL_USAGE, 0, 2)
+
+
+def test_find_next_match_skips_current_cell_when_current_cell_already_matches(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 3)
+    table.item(0, table.COL_USAGE).setText("目标-当前")
+    table.item(1, table.COL_USAGE).setText("目标-下一条")
+    table.setCurrentCell(0, table.COL_USAGE)
+
+    match = table.find_next_match("目标")
+
+    assert match is not None
+    assert (match.row, match.col) == (1, table.COL_USAGE)
+
+
+def test_replace_match_only_updates_matched_substring_and_uses_undo(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 2)
+    table.item(0, table.COL_USAGE).setText("气缸伸出到位")
+    table.setCurrentCell(1, table.COL_USAGE)
+
+    match = table.find_next_match("伸出")
+
+    assert match is not None
+
+    table.replace_match(match, "缩回")
+
+    assert table.item(0, table.COL_USAGE).text() == "气缸缩回到位"
+
+    table.undo()
+    assert table.item(0, table.COL_USAGE).text() == "气缸伸出到位"
+
+    table.redo()
+    assert table.item(0, table.COL_USAGE).text() == "气缸缩回到位"
+
+
+def test_replace_all_matches_batches_undo_redo(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 3)
+    table.item(0, table.COL_COMMENT).setText("伸出到位")
+    table.item(1, table.COL_COMMENT).setText("伸出报警")
+    table.item(2, table.COL_NAME).setText("X_伸出")
+
+    count = table.replace_all_matches("伸出", "缩回")
+
+    assert count == 5
+    assert table.item(0, table.COL_NAME).text().endswith("缩回到位")
+    assert table.item(0, table.COL_COMMENT).text() == "缩回到位"
+    assert table.item(1, table.COL_NAME).text().endswith("缩回报警")
+    assert table.item(1, table.COL_COMMENT).text() == "缩回报警"
+    assert table.item(2, table.COL_NAME).text() == "X_缩回"
+
+    table.undo()
+    assert table.item(0, table.COL_NAME).text().endswith("伸出到位")
+    assert table.item(0, table.COL_COMMENT).text() == "伸出到位"
+    assert table.item(1, table.COL_NAME).text().endswith("伸出报警")
+    assert table.item(1, table.COL_COMMENT).text() == "伸出报警"
+    assert table.item(2, table.COL_NAME).text() == "X_伸出"
+
+    table.redo()
+    assert table.item(0, table.COL_NAME).text().endswith("缩回到位")
+    assert table.item(0, table.COL_COMMENT).text() == "缩回到位"
+    assert table.item(1, table.COL_NAME).text().endswith("缩回报警")
+    assert table.item(1, table.COL_COMMENT).text() == "缩回报警"
+    assert table.item(2, table.COL_NAME).text() == "X_缩回"
+
+
+def test_find_next_match_supports_backward_direction_in_current_column(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    table.item(0, table.COL_COMMENT).setText("不在当前列")
+    table.item(1, table.COL_USAGE).setText("目标-A")
+    table.item(2, table.COL_USAGE).setText("目标-B")
+    table.setCurrentCell(3, table.COL_USAGE)
+
+    match = table.find_next_match("目标", direction="backward", current_column_only=True)
+
+    assert match is not None
+    assert (match.row, match.col) == (2, table.COL_USAGE)
+
+
+def test_replace_all_matches_can_limit_to_selected_cells(qtbot) -> None:
+    table = IoTableWidget()
+    qtbot.addWidget(table)
+    _fill_table(table, 4)
+    table.item(0, table.COL_USAGE).setText("目标")
+    table.item(1, table.COL_USAGE).setText("目标")
+    table.item(2, table.COL_USAGE).setText("目标")
+    table.setCurrentCell(0, table.COL_USAGE)
+    table.setRangeSelected(QTableWidgetSelectionRange(0, table.COL_USAGE, 1, table.COL_USAGE), True)
+
+    count = table.replace_all_matches("目标", "完成", selected_only=True)
+
+    assert count == 2
+    assert table.item(0, table.COL_USAGE).text() == "完成"
+    assert table.item(1, table.COL_USAGE).text() == "完成"
+    assert table.item(2, table.COL_USAGE).text() == "目标"
+
+
+def test_ctrl_f_shortcut_opens_find_dialog_for_active_editor(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    window.show()
+    table.setFocus()
+
+    qtbot.keyClick(table, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+    QApplication.processEvents()
+
+    dialog = window._find_replace_dialog
+
+    assert dialog is not None
+    assert dialog.isVisible()
+    assert dialog.is_replace_mode() is False
+
+
+def test_ctrl_h_shortcut_opens_replace_dialog_for_active_editor(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    table = window._channel_tables[0]
+    window.show()
+    table.setFocus()
+
+    qtbot.keyClick(table, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier)
+    QApplication.processEvents()
+
+    dialog = window._find_replace_dialog
+
+    assert dialog is not None
+    assert dialog.isVisible()
+    assert dialog.is_replace_mode() is True
+
+
+def test_replace_dialog_replace_current_updates_project(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel("A", [IoPoint(name="A", data_type="BOOL", address="0.00", comment="气缸伸出到位")]),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=1)
+    table = window._channel_tables[0]
+
+    window._open_replace_dialog()
+    dialog = window._find_replace_dialog
+
+    assert dialog is not None
+
+    dialog.set_search_text("伸出")
+    dialog.set_replace_text("缩回")
+
+    window._find_next_in_current_table()
+    window._replace_current_in_current_table()
+    QApplication.processEvents()
+
+    assert table.item(0, table.COL_COMMENT).text() == "气缸缩回到位"
+    assert window._project.channels[0].points[0].comment == "气缸缩回到位"
+
+
+def test_find_dialog_keeps_selection_scope_while_searching(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "A",
+                [
+                    IoPoint(name="A", data_type="BOOL", address="0.00", comment="", usage="目标-1"),
+                    IoPoint(name="B", data_type="BOOL", address="0.01", comment="", usage="目标-2"),
+                    IoPoint(name="C", data_type="BOOL", address="0.02", comment="", usage="目标-3"),
+                ],
+            ),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=1)
+    table = window._channel_tables[0]
+    table.setCurrentCell(0, table.COL_USAGE)
+    table.setRangeSelected(QTableWidgetSelectionRange(0, table.COL_USAGE, 1, table.COL_USAGE), True)
+
+    window._open_find_dialog()
+    dialog = window._find_replace_dialog
+
+    assert dialog is not None
+
+    dialog.set_search_text("目标")
+    dialog.set_selected_only(True)
+    window._find_next_in_current_table()
+    selected_cells = sorted((index.row(), index.column()) for index in table.selectedIndexes())
+
+    assert selected_cells == [(0, table.COL_USAGE), (1, table.COL_USAGE)]
+    assert table.currentRow() == 1
+
+    window._find_next_in_current_table()
+    selected_cells = sorted((index.row(), index.column()) for index in table.selectedIndexes())
+
+    assert selected_cells == [(0, table.COL_USAGE), (1, table.COL_USAGE)]
+    assert table.currentRow() == 0
+
+
+def test_replace_dialog_scope_options_limit_to_current_column_and_selection(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    window._project = IoProject(
+        name="demo",
+        channels=[
+            IoChannel(
+                "A",
+                [
+                    IoPoint(name="A", data_type="BOOL", address="0.00", comment="目标", usage="目标"),
+                    IoPoint(name="B", data_type="BOOL", address="0.01", comment="", usage="目标"),
+                    IoPoint(name="C", data_type="BOOL", address="0.02", comment="", usage="目标"),
+                ],
+            ),
+        ],
+    )
+    window._channel_tables.clear()
+    window._sync_meta_from_project()
+    window._rebuild_tabs(select_index=1)
+    table = window._channel_tables[0]
+    table.setCurrentCell(0, table.COL_USAGE)
+    table.setRangeSelected(QTableWidgetSelectionRange(0, table.COL_USAGE, 1, table.COL_USAGE), True)
+
+    window._open_replace_dialog()
+    dialog = window._find_replace_dialog
+
+    assert dialog is not None
+
+    dialog.set_search_text("目标")
+    dialog.set_replace_text("完成")
+    dialog.set_current_column_only(True)
+    dialog.set_selected_only(True)
+    window._replace_all_in_current_table()
+    QApplication.processEvents()
+
+    assert table.item(0, table.COL_USAGE).text() == "完成"
+    assert table.item(1, table.COL_USAGE).text() == "完成"
+    assert table.item(2, table.COL_USAGE).text() == "目标"
+    assert table.item(0, table.COL_COMMENT).text() == "目标"
+    assert window._project.channels[0].points[0].usage == "完成"
+    assert window._project.channels[0].points[1].usage == "完成"
+    assert window._project.channels[0].points[2].usage == "目标"
+
+
 def test_immersive_focus_bar_uses_separate_action_row_and_preserves_button_width(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     table = window._channel_tables[0]

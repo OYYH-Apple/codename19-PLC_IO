@@ -91,6 +91,16 @@ def test_main_window_has_single_ctrl_s_action(qtbot, monkeypatch) -> None:
     assert len(save_actions) == 1
 
 
+def test_main_window_exposes_find_and_replace_actions(qtbot, monkeypatch) -> None:
+    window = _make_window(qtbot, monkeypatch)
+    find_shortcut = QKeySequence(QKeySequence.StandardKey.Find).toString()
+    replace_shortcut = QKeySequence(QKeySequence.StandardKey.Replace).toString()
+    actions = window.findChildren(QAction)
+
+    assert any(action.text() == "查找…" and action.shortcut().toString() == find_shortcut for action in actions)
+    assert any(action.text() == "替换…" and action.shortcut().toString() == replace_shortcut for action in actions)
+
+
 def test_main_window_resize_hit_testing_covers_edges_and_corners(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
     window.resize(1200, 800)

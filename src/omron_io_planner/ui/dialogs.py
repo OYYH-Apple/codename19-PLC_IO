@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -247,6 +247,141 @@ class IntInputDialog(AppDialog):
         dialog = cls(title, label, value, minimum, maximum, parent)
         ok = dialog.exec() == QDialog.DialogCode.Accepted
         return dialog.value(), ok
+
+
+class FindReplaceDialog(AppDialog):
+    find_next_requested = Signal()
+    replace_requested = Signal()
+    replace_all_requested = Signal()
+    search_options_changed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__("查找和替换", object_name="appFindReplaceDialog", parent=parent)
+        self.setModal(False)
+        self.setMinimumWidth(460)
+        self._replace_mode = False
+
+        intro = QLabel("范围：当前分区编辑表格（当前可见行）。", self._body)
+        intro.setWordWrap(True)
+        self._body_layout.addWidget(intro)
+
+        fields = QWidget(self._body)
+        form = QFormLayout(fields)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+
+        self._find_edit = QLineEdit(fields)
+        self._find_edit.setClearButtonEnabled(True)
+        self._find_label = QLabel("查找内容", fields)
+        form.addRow(self._find_label, self._find_edit)
+
+        self._replace_edit = QLineEdit(fields)
+        self._replace_edit.setClearButtonEnabled(True)
+        self._replace_label = QLabel("替换为", fields)
+        form.addRow(self._replace_label, self._replace_edit)
+
+        self._case_sensitive = QCheckBox("区分大小写", fields)
+        form.addRow(self._case_sensitive)
+        self._direction = QComboBox(fields)
+        self._direction.addItem("向下", "forward")
+        self._direction.addItem("向上", "backward")
+        form.addRow("查找方向", self._direction)
+
+        scope_row = QWidget(fields)
+        scope_layout = QHBoxLayout(scope_row)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        scope_layout.setSpacing(10)
+        self._current_column_only = QCheckBox("仅当前列", scope_row)
+        self._selected_only = QCheckBox("仅选区", scope_row)
+        scope_layout.addWidget(self._current_column_only, 0)
+        scope_layout.addWidget(self._selected_only, 0)
+        scope_layout.addStretch(1)
+        form.addRow("查找范围", scope_row)
+        self._body_layout.addWidget(fields)
+
+        self._status_label = QLabel("", self._body)
+        self._status_label.setObjectName("findReplaceStatusLabel")
+        self._status_label.setWordWrap(True)
+        self._body_layout.addWidget(self._status_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self._find_next_btn = QPushButton("查找下一个", self._body)
+        self._replace_btn = QPushButton("替换", self._body)
+        self._replace_all_btn = QPushButton("全部替换", self._body)
+        self._close_btn = QPushButton("关闭", self._body)
+        for button in (self._find_next_btn, self._replace_btn, self._replace_all_btn, self._close_btn):
+            button_row.addWidget(button)
+        self._body_layout.addLayout(button_row)
+
+        self._find_edit.returnPressed.connect(lambda: self.find_next_requested.emit())
+        self._replace_edit.returnPressed.connect(lambda: self.replace_requested.emit())
+        self._find_edit.textChanged.connect(lambda _text: self.search_options_changed.emit())
+        self._case_sensitive.toggled.connect(lambda _checked: self.search_options_changed.emit())
+        self._direction.currentIndexChanged.connect(lambda _index: self.search_options_changed.emit())
+        self._current_column_only.toggled.connect(lambda _checked: self.search_options_changed.emit())
+        self._selected_only.toggled.connect(lambda _checked: self.search_options_changed.emit())
+        self._find_next_btn.clicked.connect(lambda _checked=False: self.find_next_requested.emit())
+        self._replace_btn.clicked.connect(lambda _checked=False: self.replace_requested.emit())
+        self._replace_all_btn.clicked.connect(lambda _checked=False: self.replace_all_requested.emit())
+        self._close_btn.clicked.connect(self.hide)
+
+        self.set_replace_mode(False)
+
+    def set_replace_mode(self, enabled: bool) -> None:
+        self._replace_mode = bool(enabled)
+        self._replace_label.setHidden(not self._replace_mode)
+        self._replace_edit.setHidden(not self._replace_mode)
+        self._replace_btn.setHidden(not self._replace_mode)
+        self._replace_all_btn.setHidden(not self._replace_mode)
+
+    def is_replace_mode(self) -> bool:
+        return self._replace_mode
+
+    def search_text(self) -> str:
+        return self._find_edit.text()
+
+    def set_search_text(self, text: str) -> None:
+        self._find_edit.setText(text)
+
+    def replace_text(self) -> str:
+        return self._replace_edit.text()
+
+    def set_replace_text(self, text: str) -> None:
+        self._replace_edit.setText(text)
+
+    def case_sensitive(self) -> bool:
+        return self._case_sensitive.isChecked()
+
+    def search_direction(self) -> str:
+        return str(self._direction.currentData() or "forward")
+
+    def set_search_direction(self, direction: str) -> None:
+        target = str(direction or "forward")
+        index = self._direction.findData(target)
+        self._direction.setCurrentIndex(index if index >= 0 else 0)
+
+    def current_column_only(self) -> bool:
+        return self._current_column_only.isChecked()
+
+    def set_current_column_only(self, enabled: bool) -> None:
+        self._current_column_only.setChecked(bool(enabled))
+
+    def selected_only(self) -> bool:
+        return self._selected_only.isChecked()
+
+    def set_selected_only(self, enabled: bool) -> None:
+        self._selected_only.setChecked(bool(enabled))
+
+    def set_status_text(self, text: str) -> None:
+        self._status_label.setText(text)
+
+    def focus_search_input(self) -> None:
+        self._find_edit.setFocus()
+        self._find_edit.selectAll()
+
+    def reject(self) -> None:
+        self.hide()
 
 
 class PreferencesDialog(AppDialog):
