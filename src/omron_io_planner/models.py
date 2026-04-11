@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from .omron_symbol_types import normalize_data_type
+from .program_models import FunctionBlock, ProgramUnit
 
 
 @dataclass
@@ -39,6 +40,9 @@ class IoProject:
     channels: List[IoChannel] = field(default_factory=list)
     workspace_state: dict[str, Any] = field(default_factory=dict)
     project_preferences: dict[str, Any] = field(default_factory=dict)
+    programs: List[ProgramUnit] = field(default_factory=list)
+    function_blocks: List[FunctionBlock] = field(default_factory=list)
+    program_settings: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.channels:

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import IoProject
-from .persistence import load_project_json, project_from_dict, save_project_json
+from .persistence import project_from_dict, write_text_atomic
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 路径解析
@@ -128,9 +128,9 @@ class Prefs:
 
     def _save(self) -> None:
         try:
-            _PREFS_FILE.write_text(
+            write_text_atomic(
+                _PREFS_FILE,
                 json.dumps(self._data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
             )
         except Exception:
             pass
@@ -351,9 +351,9 @@ def autosave(project: IoProject, source_path: str | Path | None = None) -> None:
             "timestamp": time.time(),
             "project": _project_to_dict(project),
         }
-        _AUTOSAVE_FILE.write_text(
+        write_text_atomic(
+            _AUTOSAVE_FILE,
             json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
     except Exception:
         pass

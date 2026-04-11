@@ -4,6 +4,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .workbuddy/
+.omx/
+.learnings/
 *.egg-info/
 dist/
 build/
