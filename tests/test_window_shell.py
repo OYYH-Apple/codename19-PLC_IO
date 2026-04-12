@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QToolBar, QToolButton
 from omron_io_planner import app as app_module
 from omron_io_planner.models import IoProject
 from omron_io_planner.persistence import load_project_json, save_project_json
-from omron_io_planner.project_manager import Prefs, autosave, autosave_needs_recovery
+from omron_io_planner.program_models import FunctionBlock, ProgramUnit, StDocument
+from omron_io_planner.project_manager import Prefs, autosave, autosave_needs_recovery, load_autosave
 from omron_io_planner.ui.dialogs import MessageDialog, TextInputDialog
 from omron_io_planner.ui.icons import load_icon
 from omron_io_planner.ui.main_window import MainWindow
@@ -39,6 +40,32 @@ def test_autosave_snapshot_is_ignored_when_saved_file_is_newer(tmp_path, monkeyp
     os.utime(project_path, (newer, newer))
 
     assert not autosave_needs_recovery()
+
+
+def test_autosave_roundtrip_preserves_programs_and_function_blocks(tmp_path, monkeypatch) -> None:
+    autosave_path = tmp_path / "autosave.json"
+    monkeypatch.setattr("omron_io_planner.project_manager._AUTOSAVE_FILE", autosave_path)
+
+    main = ProgramUnit(
+        uid="p1",
+        name="Main",
+        implementation_language="st",
+        st_document=StDocument(source="(* autosave body *)\nx := 1;"),
+    )
+    fb = FunctionBlock(
+        uid="f1",
+        name="FB1",
+        implementation_language="st",
+        st_document=StDocument(source="y := 2;"),
+    )
+    proj = IoProject(name="demo", programs=[main], function_blocks=[fb])
+    autosave(proj, None)
+    loaded = load_autosave()
+    assert loaded is not None
+    assert len(loaded.programs) == 1
+    assert loaded.programs[0].st_document.source == main.st_document.source
+    assert len(loaded.function_blocks) == 1
+    assert loaded.function_blocks[0].st_document.source == fb.st_document.source
 
 
 def test_close_event_clears_autosave_when_project_is_clean(qtbot, monkeypatch) -> None:

@@ -8,6 +8,9 @@ from omron_io_planner.ui.program_editors import (
     FunctionBlockVariableEditor,
     LadderEditorWidget,
     StructuredTextEditor,
+    _st_block_comment_depth,
+    _st_line_needs_semicolon_suffix,
+    _st_normalize_line_equals_to_colon_equals,
 )
 
 
@@ -51,6 +54,33 @@ def test_function_block_variable_editor_supports_editing_and_undo(qtbot) -> None
     assert editor.variables()[1].data_type == "INT"
 
 
+def test_st_normalize_line_equals_to_colon_equals() -> None:
+    assert _st_normalize_line_equals_to_colon_equals("x = 1") == "x := 1"
+    assert _st_normalize_line_equals_to_colon_equals("  Out = TRUE") == "  Out := TRUE"
+    assert _st_normalize_line_equals_to_colon_equals("x := 1") is None
+    assert _st_normalize_line_equals_to_colon_equals("a <= b") is None
+    assert _st_normalize_line_equals_to_colon_equals("a=b=c") is None
+    assert _st_normalize_line_equals_to_colon_equals("IF a = b THEN") is None
+    assert _st_normalize_line_equals_to_colon_equals("WHILE x = 1 DO") is None
+
+
+def test_st_line_needs_semicolon_suffix() -> None:
+    assert _st_line_needs_semicolon_suffix("x := 1") is True
+    assert _st_line_needs_semicolon_suffix("x := 1;") is False
+    assert _st_line_needs_semicolon_suffix("IF a THEN") is False
+    assert _st_line_needs_semicolon_suffix("CASE x OF") is False
+    assert _st_line_needs_semicolon_suffix("10:") is False
+    assert _st_line_needs_semicolon_suffix("IF") is False
+    assert _st_line_needs_semicolon_suffix("") is False
+
+
+def test_st_block_comment_depth() -> None:
+    assert _st_block_comment_depth("") == 0
+    assert _st_block_comment_depth("(* ") == 1
+    assert _st_block_comment_depth("(* x *) y") == 0
+    assert _st_block_comment_depth("(* (* nested *)") == 1
+
+
 def test_structured_text_editor_tracks_unknown_identifiers_and_can_create_symbol(qtbot) -> None:
     project, block, index = _program_context()
     editor = StructuredTextEditor()
@@ -78,15 +108,18 @@ def test_ladder_editor_places_elements_and_supports_undo(qtbot) -> None:
     editor.place_element(1, 4, "coil", operand="MotorRun")
 
     network = editor.networks()[0]
-    assert network.cells[0].element.kind == "contact_no"
-    assert network.cells[1].element.operand == "MotorRun"
+    by_slot = {e.slot_index: e for e in network.rungs[1].elements}
+    assert by_slot[1].spec_id == "omron.ld"
+    assert by_slot[1].operands[0] == "SensorReady"
+    assert by_slot[4].spec_id == "omron.out"
+    assert by_slot[4].operands[0] == "MotorRun"
     assert any(item.text == "SET" for item in editor.completion_items("Se"))
 
     editor.undo()
-    assert len(editor.networks()[0].cells) == 1
+    assert len(editor.networks()[0].rungs[1].elements) == 1
 
     editor.redo()
-    assert len(editor.networks()[0].cells) == 2
+    assert len(editor.networks()[0].rungs[1].elements) == 2
 
     editor.create_missing_symbol("MotorRun")
     assert block.variables[-1].name == "MotorRun"
@@ -94,7 +127,7 @@ def test_ladder_editor_places_elements_and_supports_undo(qtbot) -> None:
 
     editor.copy_current_cell(1, 1)
     editor.paste_current_cell(2, 1)
-    assert any(cell.row == 2 and cell.column == 1 for cell in editor.networks()[0].cells)
+    assert any(e.slot_index == 1 and e.spec_id == "omron.ld" for e in editor.networks()[0].rungs[2].elements)
 
     editor.delete_current_cell(2, 1)
-    assert not any(cell.row == 2 and cell.column == 1 for cell in editor.networks()[0].cells)
+    assert not any(e.slot_index == 1 for e in editor.networks()[0].rungs[2].elements)

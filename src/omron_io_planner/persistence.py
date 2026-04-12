@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .models import IoChannel, IoPoint, IoProject
+from .omron_ladder_migration import migrate_ladder_network_to_v2
 from .program_models import (
     FunctionBlock,
     LadderCell,
     LadderElement,
+    LadderInstructionInstance,
     LadderNetwork,
+    LadderRung,
     ProgramUnit,
     StDocument,
     VariableDecl,
@@ -39,13 +42,18 @@ def _point_to_dict(p: IoPoint) -> Dict[str, Any]:
 
 
 def _variable_to_dict(variable: VariableDecl) -> Dict[str, Any]:
-    return {
+    d: Dict[str, Any] = {
         "name": variable.name,
         "data_type": variable.data_type,
         "category": variable.category,
         "comment": variable.comment,
         "initial_value": variable.initial_value,
     }
+    if variable.at_address:
+        d["at_address"] = variable.at_address
+    if variable.retain:
+        d["retain"] = True
+    return d
 
 
 def _element_to_dict(element: LadderElement) -> Dict[str, Any]:
@@ -65,14 +73,42 @@ def _cell_to_dict(cell: LadderCell) -> Dict[str, Any]:
     }
 
 
-def _network_to_dict(network: LadderNetwork) -> Dict[str, Any]:
+def _instruction_instance_to_dict(inst: LadderInstructionInstance) -> Dict[str, Any]:
+    d: Dict[str, Any] = {
+        "id": inst.instance_id,
+        "spec_id": inst.spec_id,
+        "operands": list(inst.operands),
+        "comment": inst.comment,
+        "slot": inst.slot_index,
+    }
+    if inst.branch_group_id:
+        d["branch_group_id"] = inst.branch_group_id
+    return d
+
+
+def _rung_to_dict(rung: LadderRung) -> Dict[str, Any]:
     return {
+        "index": rung.index,
+        "label": rung.label,
+        "comment": rung.comment,
+        "elements": [_instruction_instance_to_dict(element) for element in rung.elements],
+    }
+
+
+def _network_to_dict(network: LadderNetwork) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
         "title": network.title,
         "rows": network.rows,
         "columns": network.columns,
         "comment": network.comment,
-        "cells": [_cell_to_dict(cell) for cell in network.cells],
+        "format_version": network.format_version,
     }
+    if network.format_version >= 2:
+        base["rungs"] = [_rung_to_dict(rung) for rung in network.rungs]
+        base["cells"] = []
+    else:
+        base["cells"] = [_cell_to_dict(cell) for cell in network.cells]
+    return base
 
 
 def _program_to_dict(program: ProgramUnit) -> Dict[str, Any]:
@@ -99,6 +135,20 @@ def _function_block_to_dict(block: FunctionBlock) -> Dict[str, Any]:
     }
 
 
+def _normalize_project_workspace_state(ws: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(ws)
+    pw = dict(out.get("program_workspace") or {})
+    sel = str(pw.get("selected_item", "") or "")
+    if sel.startswith("fb:") and (
+        sel.endswith(":variables") or sel.endswith(":body") or sel.endswith(":block")
+    ):
+        parts = sel.split(":")
+        if len(parts) >= 2:
+            pw["selected_item"] = f"fb:{parts[1]}:editor"
+    out["program_workspace"] = pw
+    return out
+
+
 def project_from_dict(d: Dict[str, Any]) -> IoProject:
     raw_ch = d.get("channels")
     if isinstance(raw_ch, list) and len(raw_ch) > 0:
@@ -114,7 +164,7 @@ def project_from_dict(d: Dict[str, Any]) -> IoProject:
             name=d.get("name", "未命名"),
             plc_prefix=d.get("plc_prefix", "PLC"),
             channels=chs,
-            workspace_state=dict(d.get("workspace_state") or {}),
+            workspace_state=_normalize_project_workspace_state(dict(d.get("workspace_state") or {})),
             project_preferences=dict(d.get("project_preferences") or {}),
             programs=[_program_from_dict(program) for program in d.get("programs", [])],
             function_blocks=[_function_block_from_dict(block) for block in d.get("function_blocks", [])],
@@ -125,7 +175,7 @@ def project_from_dict(d: Dict[str, Any]) -> IoProject:
         name=d.get("name", "未命名"),
         plc_prefix=d.get("plc_prefix", "PLC"),
         channels=[IoChannel(name="导入数据", zone_id="", points=pts)],
-        workspace_state=dict(d.get("workspace_state") or {}),
+        workspace_state=_normalize_project_workspace_state(dict(d.get("workspace_state") or {})),
         project_preferences=dict(d.get("project_preferences") or {}),
         programs=[_program_from_dict(program) for program in d.get("programs", [])],
         function_blocks=[_function_block_from_dict(block) for block in d.get("function_blocks", [])],
@@ -151,6 +201,8 @@ def _variable_from_dict(x: Dict[str, Any]) -> VariableDecl:
         category=str(x.get("category", "VAR")).strip() or "VAR",
         comment=str(x.get("comment", "")).strip(),
         initial_value=str(x.get("initial_value", "")).strip(),
+        at_address=str(x.get("at_address", x.get("at", "")) or "").strip(),
+        retain=bool(x.get("retain", False)),
     )
 
 
@@ -173,14 +225,58 @@ def _cell_from_dict(x: Dict[str, Any]) -> LadderCell:
     )
 
 
+def _instruction_instance_from_dict(d: Dict[str, Any]) -> LadderInstructionInstance:
+    raw_ops = d.get("operands", [])
+    operands: list[str] = []
+    if isinstance(raw_ops, list):
+        operands = ["" if x is None else str(x) for x in raw_ops]
+    return LadderInstructionInstance(
+        instance_id=str(d.get("id", "") or "").strip(),
+        spec_id=str(d.get("spec_id", "") or "").strip(),
+        operands=operands,
+        comment=str(d.get("comment", "") or "").strip(),
+        slot_index=int(d.get("slot", 0) or 0),
+        branch_group_id=str(d.get("branch_group_id", "") or "").strip(),
+    )
+
+
+def _rung_from_dict(d: Dict[str, Any]) -> LadderRung:
+    elements_raw = d.get("elements", [])
+    elements: list[LadderInstructionInstance] = []
+    if isinstance(elements_raw, list):
+        for item in elements_raw:
+            if isinstance(item, dict):
+                elements.append(_instruction_instance_from_dict(item))
+    return LadderRung(
+        index=int(d.get("index", 0) or 0),
+        label=str(d.get("label", "") or "").strip(),
+        comment=str(d.get("comment", "") or "").strip(),
+        elements=elements,
+    )
+
+
 def _network_from_dict(x: Dict[str, Any]) -> LadderNetwork:
-    return LadderNetwork(
+    format_version = int(x.get("format_version", 1) or 1)
+    rungs_raw = x.get("rungs", [])
+    rungs: list[LadderRung] = []
+    if format_version >= 2 and isinstance(rungs_raw, list):
+        for item in rungs_raw:
+            if isinstance(item, dict):
+                rungs.append(_rung_from_dict(item))
+    network = LadderNetwork(
         title=str(x.get("title", "")).strip(),
         rows=int(x.get("rows", 6) or 6),
         columns=int(x.get("columns", 8) or 8),
         comment=str(x.get("comment", "")).strip(),
         cells=[_cell_from_dict(cell) for cell in x.get("cells", []) if isinstance(cell, dict)],
+        format_version=format_version,
+        rungs=rungs,
     )
+    if network.format_version >= 2 and not network.rungs:
+        network.rungs = [LadderRung(index=i) for i in range(max(network.rows, 1))]
+    elif network.format_version < 2 and network.cells:
+        migrate_ladder_network_to_v2(network)
+    return network
 
 
 def _program_from_dict(x: Dict[str, Any]) -> ProgramUnit:
@@ -205,6 +301,20 @@ def _function_block_from_dict(x: Dict[str, Any]) -> FunctionBlock:
         ladder_networks=[_network_from_dict(network) for network in x.get("ladder_networks", []) if isinstance(network, dict)],
         workspace_state=dict(x.get("workspace_state") or {}),
     )
+
+
+def project_to_dict(project: IoProject) -> Dict[str, Any]:
+    """与 :func:`save_project_json` 写入磁盘的项目结构一致（供自动保存等复用）。"""
+    return {
+        "name": project.name,
+        "plc_prefix": project.plc_prefix,
+        "channels": [_channel_to_dict(c) for c in project.channels],
+        "workspace_state": project.workspace_state,
+        "project_preferences": project.project_preferences,
+        "programs": [_program_to_dict(program) for program in project.programs],
+        "function_blocks": [_function_block_to_dict(block) for block in project.function_blocks],
+        "program_settings": project.program_settings,
+    }
 
 
 def write_text_atomic(
@@ -245,17 +355,7 @@ def write_text_atomic(
 
 def save_project_json(project: IoProject, path: str | Path) -> None:
     path = Path(path)
-    body = {
-        "name": project.name,
-        "plc_prefix": project.plc_prefix,
-        "channels": [_channel_to_dict(c) for c in project.channels],
-        "workspace_state": project.workspace_state,
-        "project_preferences": project.project_preferences,
-        "programs": [_program_to_dict(program) for program in project.programs],
-        "function_blocks": [_function_block_to_dict(block) for block in project.function_blocks],
-        "program_settings": project.program_settings,
-    }
-    write_text_atomic(path, json.dumps(body, ensure_ascii=False, indent=2))
+    write_text_atomic(path, json.dumps(project_to_dict(project), ensure_ascii=False, indent=2))
 
 
 def load_project_json(path: str | Path) -> IoProject:

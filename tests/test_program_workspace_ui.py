@@ -1,12 +1,30 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
 
 from omron_io_planner.models import IoProject
 from omron_io_planner.program_models import FunctionBlock, ProgramUnit
 from omron_io_planner.ui.main_window import MainWindow
 from omron_io_planner.ui.program_workspace import ProgramWorkspace
+
+
+def _all_tree_role_keys(tree: QTreeWidget) -> list[str]:
+    keys: list[str] = []
+
+    def walk(item: QTreeWidgetItem | None) -> None:
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data:
+            keys.append(str(data))
+        for i in range(item.childCount()):
+            walk(item.child(i))
+
+    for i in range(tree.topLevelItemCount()):
+        walk(tree.topLevelItem(i))
+    return keys
 
 
 def _make_window(qtbot, monkeypatch) -> MainWindow:
@@ -73,9 +91,21 @@ def test_program_workspace_restores_selected_item(qtbot) -> None:
 
     workspace.set_project(project)
 
-    assert workspace.current_item_key() == "fb:fb-1:variables"
+    assert workspace.current_item_key() == "fb:fb-1:editor"  # 旧 :variables 迁移为 :editor
     assert "主程序 1" in workspace.item_labels()
-    assert "AxisHome / 变量定义" in workspace.item_labels()
+    assert "AxisHome" in workspace.item_labels()
+
+
+def test_program_workspace_fb_root_has_block_key(qtbot) -> None:
+    workspace = ProgramWorkspace()
+    qtbot.addWidget(workspace)
+    project = IoProject(
+        programs=[ProgramUnit(uid="main-1", name="主程序 1")],
+        function_blocks=[FunctionBlock(uid="fb-1", name="AxisHome")],
+    )
+    workspace.set_project(project)
+    keys = _all_tree_role_keys(workspace._tree)
+    assert "fb:fb-1:editor" in keys
 
 
 def test_main_window_exposes_program_workspace_entry(qtbot, monkeypatch) -> None:

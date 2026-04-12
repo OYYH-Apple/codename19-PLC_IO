@@ -594,7 +594,8 @@ def test_immersive_mode_hides_outer_chrome_and_shows_focus_bar(qtbot, monkeypatc
     assert window._recent_group.isHidden()
     assert window._project_meta_group.isHidden()
     assert window._copy_group.isHidden()
-    assert sidebar.isHidden()
+    # 子控件在父级 hide() 后仍可能 isHidden()==False；以外层侧栏为准
+    assert window._sidebar is not None and window._sidebar.isHidden()
     assert not window._btn_enter_immersive.isHidden()
     assert window._btn_enter_immersive.text() == "退出沉浸"
     assert not window._editor_focus_bars[table].isHidden()

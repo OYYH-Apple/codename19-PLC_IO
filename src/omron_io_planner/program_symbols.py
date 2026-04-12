@@ -106,6 +106,18 @@ class ProgramSymbolIndex:
         names.update(keywords)
         return names
 
+    def ladder_operand_names(
+        self,
+        *,
+        function_block: FunctionBlock | None = None,
+        program_unit: ProgramUnit | None = None,
+    ) -> list[str]:
+        """梯形图可拖放/绑定的符号名（IO + 变量，不含梯形关键字）。"""
+        raw = self.known_names(function_block=function_block, program_unit=program_unit, mode="ladder")
+        kw = {k.casefold() for k in LADDER_KEYWORDS}
+        names = [n for n in raw if n.strip() and n.casefold() not in kw]
+        return sorted(names, key=str.casefold)
+
     def create_missing_symbol(
         self,
         name: str,

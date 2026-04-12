@@ -7,7 +7,9 @@ from omron_io_planner.program_models import (
     FunctionBlock,
     LadderCell,
     LadderElement,
+    LadderInstructionInstance,
     LadderNetwork,
+    LadderRung,
     ProgramUnit,
     StDocument,
     VariableDecl,
@@ -64,7 +66,14 @@ def test_project_json_roundtrip_preserves_program_domain(tmp_path) -> None:
             variables=[
                 VariableDecl(name="Enable", data_type="BOOL", category="IN", comment="启动"),
                 VariableDecl(name="Done", data_type="BOOL", category="OUT", comment="完成"),
-                VariableDecl(name="Step", data_type="INT", category="VAR", comment="步骤"),
+                VariableDecl(
+                    name="Step",
+                    data_type="INT",
+                    category="VAR",
+                    comment="步骤",
+                    at_address="D100",
+                    retain=True,
+                ),
             ],
             st_document=StDocument(source="IF Enable THEN\n    Step := 1;\nEND_IF;"),
             workspace_state={"selected_view": "body"},
@@ -82,8 +91,57 @@ def test_project_json_roundtrip_preserves_program_domain(tmp_path) -> None:
     loaded = load_project_json(path)
 
     assert loaded.program_settings["default_language"] == "ladder"
-    assert loaded.programs[0].ladder_networks[0].cells[0].element.kind == "contact_no"
-    assert loaded.programs[0].ladder_networks[0].cells[1].element.operand == "MotorRun"
+    ladder = loaded.programs[0].ladder_networks[0]
+    assert ladder.format_version == 2
+    assert ladder.cells == []
+    by_slot = {e.slot_index: e for e in ladder.rungs[1].elements}
+    assert by_slot[1].spec_id == "omron.ld"
+    assert by_slot[1].operands[0] == "StartPB"
+    assert by_slot[4].spec_id == "omron.out"
+    assert by_slot[4].operands[0] == "MotorRun"
     assert loaded.function_blocks[0].variables[1].category == "OUT"
+    assert loaded.function_blocks[0].variables[2].at_address == "D100"
+    assert loaded.function_blocks[0].variables[2].retain is True
     assert "Step := 1" in loaded.function_blocks[0].st_document.source
-    assert loaded.workspace_state["program_workspace"]["selected_item"] == "fb:fb-1:body"
+    assert loaded.workspace_state["program_workspace"]["selected_item"] == "fb:fb-1:editor"
+
+
+def test_branch_group_id_roundtrips_in_json(tmp_path) -> None:
+    path = tmp_path / "branch.json"
+    project = IoProject(name="b", channels=[])
+    rungs = [
+        LadderRung(
+            index=0,
+            elements=[
+                LadderInstructionInstance(
+                    instance_id="i1",
+                    spec_id="omron.parallel_open",
+                    operands=["G1"],
+                    slot_index=0,
+                    branch_group_id="G1",
+                ),
+            ],
+        )
+    ]
+    project.programs = [
+        ProgramUnit(
+            uid="m1",
+            name="M",
+            implementation_language="ladder",
+            ladder_networks=[
+                LadderNetwork(
+                    title="N",
+                    rows=1,
+                    columns=8,
+                    format_version=2,
+                    rungs=rungs,
+                    cells=[],
+                )
+            ],
+        )
+    ]
+    save_project_json(project, path)
+    loaded = load_project_json(path)
+    el = loaded.programs[0].ladder_networks[0].rungs[0].elements[0]
+    assert el.branch_group_id == "G1"
+    assert el.spec_id == "omron.parallel_open"

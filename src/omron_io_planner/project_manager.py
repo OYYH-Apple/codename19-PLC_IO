@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import IoProject
-from .persistence import project_from_dict, write_text_atomic
+from .persistence import project_from_dict, project_to_dict, write_text_atomic
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 路径解析
@@ -79,33 +79,6 @@ _DEFAULT_RECENT_WORKSPACE_PREFS = {
     "auto_prune_missing": True,
     "allow_pinned": True,
 }
-
-
-def _project_to_dict(project: IoProject) -> dict:
-    return {
-        "name": project.name,
-        "plc_prefix": project.plc_prefix,
-        "workspace_state": project.workspace_state,
-        "project_preferences": project.project_preferences,
-        "channels": [
-            {
-                "name": channel.name,
-                "zone_id": channel.zone_id,
-                "points": [
-                    {
-                        "name": point.name,
-                        "data_type": point.data_type,
-                        "address": point.address,
-                        "comment": point.comment,
-                        "rack": point.rack,
-                        "usage": point.usage,
-                    }
-                    for point in channel.points
-                ],
-            }
-            for channel in project.channels
-        ],
-    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -349,7 +322,7 @@ def autosave(project: IoProject, source_path: str | Path | None = None) -> None:
                 else 0.0
             ),
             "timestamp": time.time(),
-            "project": _project_to_dict(project),
+            "project": project_to_dict(project),
         }
         write_text_atomic(
             _AUTOSAVE_FILE,
