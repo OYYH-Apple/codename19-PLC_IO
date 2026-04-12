@@ -531,10 +531,10 @@ class MainWindowChannelsMixin:
             self._btn_enter_immersive.setToolTip("聚焦当前分区编辑画布")
 
     def _sync_workspace_mode_buttons(self) -> None:
-        if self._btn_workspace_io is not None:
-            self._btn_workspace_io.setChecked(self._workspace_mode == "io")
-        if self._btn_workspace_program is not None:
-            self._btn_workspace_program.setChecked(self._workspace_mode == "program")
+        if self._workspace_shell is not None:
+            self._workspace_shell.blockSignals(True)
+            self._workspace_shell.setCurrentIndex(1 if self._workspace_mode == "program" else 0)
+            self._workspace_shell.blockSignals(False)
         if self._immersive_action is not None:
             self._immersive_action.setEnabled(self._workspace_mode == "io")
 
@@ -543,8 +543,6 @@ class MainWindowChannelsMixin:
         if mode == "program" and self._immersive_mode:
             self._set_immersive_mode(False)
         self._workspace_mode = mode
-        if self._workspace_stack is not None:
-            self._workspace_stack.setCurrentIndex(1 if mode == "program" else 0)
         self._sync_workspace_mode_buttons()
         if self._program_workspace is not None and mode == "program":
             self._program_workspace.set_project(self._project)
@@ -561,8 +559,7 @@ class MainWindowChannelsMixin:
         self._sync_immersive_corner_button()
         prefs = _get_prefs()
         startup_prefs = prefs.startup_preferences() if hasattr(prefs, "startup_preferences") else {}
-        if self._sidebar is not None:
-            self._sidebar.setHidden(enabled)
+        self._sync_main_sidebar_visibility()
         for widget in (self._project_meta_group, self._copy_group, self._toolbar):
             if widget is not None:
                 widget.setHidden(enabled)

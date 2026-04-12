@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from ..export import tsv_from_rows
 from ..models import IoProject
 from ..program_export import cxr_text_from_ladder_networks, rows_variable_table, st_text_for_export
-from ..program_models import FunctionBlock, ProgramUnit, StDocument
+from ..program_models import FunctionBlock, LadderNetwork, ProgramUnit, StDocument
 from ..program_symbols import ProgramSymbolIndex
 from .program_editors import FunctionBlockVariableEditor, LadderEditorWidget, StructuredTextEditor
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication
 
 from omron_io_planner.models import IoProject
 from omron_io_planner.program_models import FunctionBlock, ProgramUnit
@@ -80,9 +80,10 @@ def test_program_workspace_restores_selected_item(qtbot) -> None:
 
 def test_main_window_exposes_program_workspace_entry(qtbot, monkeypatch) -> None:
     window = _make_window(qtbot, monkeypatch)
-    buttons = [button for button in window.findChildren(QPushButton) if button.text() in {"IO 分配", "程序编辑"}]
-
-    assert {button.text() for button in buttons} == {"IO 分配", "程序编辑"}
+    assert window._workspace_shell is not None
+    assert window._workspace_shell.count() == 2
+    assert window._workspace_shell.tabText(0) == "IO 分配"
+    assert window._workspace_shell.tabText(1) == "程序编辑"
 
     window._set_workspace_mode("program")
     QApplication.processEvents()

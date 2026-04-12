@@ -6,12 +6,13 @@ import json
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -21,8 +22,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
-    QSizePolicy,
-    QStackedWidget,
+    QSplitter,
+    QSplitterHandle,
     QStatusBar,
     QTabBar,
     QTabWidget,
@@ -99,6 +100,89 @@ from .main_window_preview_validation import MainWindowPreviewValidationMixin
 from .main_window_recents_menus import MainWindowRecentsMenusMixin
 from .main_window_channels import MainWindowChannelsMixin
 
+# 左侧项目栏宽度：拖动上限为默认宽度，可双击分割条收起/展开。
+_SIDEBAR_WIDTH_DEFAULT = 280
+_SIDEBAR_WIDTH_MIN = 200
+# 折叠后保留可点的窄条宽度（避免 hide() 导致分割手柄失效无法展开）
+_SIDEBAR_COLLAPSED_STRIP = 8
+
+
+class SidebarExpandRail(QFrame):
+    """折叠态左侧窄条：双击请求展开（分割条在窄条右侧，仍可拖/双击）。"""
+
+    expand_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("sidebarExpandRail")
+        self.setFixedWidth(_SIDEBAR_COLLAPSED_STRIP)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("双击展开项目栏")
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.expand_requested.emit()
+        super().mouseDoubleClickEvent(event)
+
+
+class SplitterGripHandle(QSplitterHandle):
+    """主分割条手柄：悬停时显示常见「双竖线」拖拽提示；双击切换侧栏折叠。"""
+
+    double_clicked = Signal()
+
+    def __init__(self, orientation: Qt.Orientation, parent: QSplitter) -> None:
+        super().__init__(orientation, parent)
+        self.setMouseTracking(True)
+        self._hover = False
+        self.setCursor(Qt.CursorShape.SplitHCursor)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+    def enterEvent(self, event: QEvent) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event: QEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._hover:
+            painter.fillRect(self.rect(), QColor("#D8E4F6"))
+            line = QColor("#3D5A80")
+        else:
+            painter.fillRect(self.rect(), QColor("#E8EDF6"))
+            line = QColor("#9AA8C0")
+        painter.setPen(QPen(line, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        cx = int(round(self.rect().center().x()))
+        cy = int(round(self.rect().center().y()))
+        top, bot = cy - 10, cy + 10
+        painter.drawLine(cx - 2, top, cx - 2, bot)
+        painter.drawLine(cx + 2, top, cx + 2, bot)
+
+
+class MainRootSplitter(QSplitter):
+    """带自定义手柄的主水平分割条。"""
+
+    handle_double_clicked = Signal()
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self.main_grip: SplitterGripHandle | None = None
+
+    def createHandle(self) -> QSplitterHandle:
+        grip = SplitterGripHandle(self.orientation(), self)
+        grip.double_clicked.connect(self.handle_double_clicked.emit)
+        self.main_grip = grip
+        return grip
+
 
 class MainWindow(
     MainWindowChannelsMixin,
@@ -125,6 +209,8 @@ class MainWindow(
         self._preview_row_links: list[tuple[int, int]] = []
         self._preview_dirty = False
         self._sidebar: QWidget | None = None
+        self._sidebar_body: QWidget | None = None
+        self._sidebar_expand_rail: SidebarExpandRail | None = None
         self._recent_group: QGroupBox | None = None
         self._recent_projects_list: QListWidget | None = None
         self._recent_filter_edit: QLineEdit | None = None
@@ -142,11 +228,12 @@ class MainWindow(
         self._validation_issues: list[dict[str, object]] = []
         self._validation_collapsed = True
         self._tabs: QTabWidget | None = None
-        self._workspace_stack: QStackedWidget | None = None
+        self._workspace_shell: QTabWidget | None = None
         self._io_workspace_page: QWidget | None = None
         self._program_workspace: ProgramWorkspace | None = None
-        self._btn_workspace_io: QPushButton | None = None
-        self._btn_workspace_program: QPushButton | None = None
+        self._root_splitter: MainRootSplitter | None = None
+        self._project_panel_collapsed = False
+        self._sidebar_saved_width = _SIDEBAR_WIDTH_DEFAULT
         self._workspace_mode = "io"
         self._modified = False          # 未保存修改标记
         self._toast: ToastPopup | None = None
@@ -500,21 +587,37 @@ class MainWindow(
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setSpacing(12)
+        root = QVBoxLayout(central)
+        root.setSpacing(0)
         root.setContentsMargins(10, 8, 10, 6)
 
-        sidebar = QWidget(central)
+        self._root_splitter = MainRootSplitter(Qt.Orientation.Horizontal, central)
+        self._root_splitter.setObjectName("mainRootSplitter")
+        self._root_splitter.setChildrenCollapsible(True)
+        self._root_splitter.setHandleWidth(8)
+        self._root_splitter.splitterMoved.connect(self._on_root_splitter_moved)
+        self._root_splitter.handle_double_clicked.connect(self._toggle_sidebar_collapsed_from_grip)
+        root.addWidget(self._root_splitter, 1)
+
+        sidebar = QWidget(self._root_splitter)
         sidebar.setObjectName("mainSidebar")
-        sidebar.setMinimumWidth(240)
-        sidebar.setMaximumWidth(300)
+        sidebar.setMinimumWidth(_SIDEBAR_WIDTH_MIN)
+        sidebar.setMaximumWidth(_SIDEBAR_WIDTH_DEFAULT)
         self._sidebar = sidebar
-        sidebar_layout = QVBoxLayout(sidebar)
+        side_outer = QHBoxLayout(sidebar)
+        side_outer.setContentsMargins(0, 0, 0, 0)
+        side_outer.setSpacing(0)
+
+        self._sidebar_expand_rail = SidebarExpandRail(sidebar)
+        self._sidebar_expand_rail.expand_requested.connect(self._expand_sidebar_from_rail)
+        self._sidebar_expand_rail.hide()
+
+        self._sidebar_body = QWidget(sidebar)
+        sidebar_layout = QVBoxLayout(self._sidebar_body)
         sidebar_layout.setSpacing(12)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(sidebar, 0)
 
-        meta = QGroupBox("项目信息")
+        meta = QGroupBox("项目信息", self._sidebar_body)
         meta.setObjectName("projectMetaGroup")
         self._project_meta_group = meta
         form = QFormLayout(meta)
@@ -531,7 +634,7 @@ class MainWindow(
         form.addRow("符号前缀", self._plc_edit)
         sidebar_layout.addWidget(meta, 0)
 
-        recent_group = QGroupBox("最近项目")
+        recent_group = QGroupBox("最近项目", self._sidebar_body)
         self._recent_group = recent_group
         recent_group.setObjectName("recentProjectsGroup")
         recent_layout = QVBoxLayout(recent_group)
@@ -575,35 +678,34 @@ class MainWindow(
         recent_layout.addWidget(self._recent_projects_list, 1)
         sidebar_layout.addWidget(recent_group, 1)
 
-        content = QWidget()
+        side_outer.addWidget(self._sidebar_expand_rail, 0)
+        side_outer.addWidget(self._sidebar_body, 1)
+
+        content = QWidget(self._root_splitter)
         layout = QVBoxLayout(content)
         layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(content, 1)
 
-        workspace_switcher = QWidget(content)
-        workspace_switcher.setObjectName("workspaceSwitcher")
-        workspace_switcher_layout = QHBoxLayout(workspace_switcher)
-        workspace_switcher_layout.setContentsMargins(0, 0, 0, 0)
-        workspace_switcher_layout.setSpacing(8)
-        self._btn_workspace_io = _make_action_btn("IO 分配", compact=True)
-        self._btn_workspace_io.setCheckable(True)
-        self._btn_workspace_program = _make_action_btn("程序编辑", compact=True)
-        self._btn_workspace_program.setCheckable(True)
-        workspace_switcher_layout.addWidget(self._btn_workspace_io, 0)
-        workspace_switcher_layout.addWidget(self._btn_workspace_program, 0)
-        workspace_switcher_layout.addStretch(1)
-        layout.addWidget(workspace_switcher, 0)
+        self._root_splitter.addWidget(sidebar)
+        self._root_splitter.addWidget(content)
+        self._root_splitter.setStretchFactor(0, 0)
+        self._root_splitter.setStretchFactor(1, 1)
+        self._root_splitter.setSizes([self._sidebar_saved_width, max(self.width() - self._sidebar_saved_width, 400)])
 
-        self._workspace_stack = QStackedWidget(content)
-        layout.addWidget(self._workspace_stack, 1)
+        self._workspace_shell = QTabWidget(content)
+        self._workspace_shell.setObjectName("workspaceMainTabWidget")
+        self._workspace_shell.setDocumentMode(True)
+        self._workspace_shell.setTabPosition(QTabWidget.TabPosition.North)
+        self._workspace_shell.setMovable(False)
+        self._workspace_shell.setUsesScrollButtons(False)
+        self._workspace_shell.tabBar().setObjectName("workspaceMainTabBar")
+        layout.addWidget(self._workspace_shell, 1)
 
-        io_page = QWidget(self._workspace_stack)
+        io_page = QWidget(self._workspace_shell)
         self._io_workspace_page = io_page
         io_page_layout = QVBoxLayout(io_page)
         io_page_layout.setSpacing(12)
         io_page_layout.setContentsMargins(0, 0, 0, 0)
-        self._workspace_stack.addWidget(io_page)
 
         copy_group = QWidget(io_page)
         copy_group.setObjectName("projectMetaCopyPanel")
@@ -706,9 +808,12 @@ class MainWindow(
         validation_layout.addWidget(self._validation_body)
         io_page_layout.addWidget(validation_group)
 
-        self._program_workspace = ProgramWorkspace(self._workspace_stack)
+        self._workspace_shell.addTab(io_page, "IO 分配")
+        self._workspace_shell.setTabToolTip(0, "分区表编辑、导出与轻量校验")
+        self._program_workspace = ProgramWorkspace(self._workspace_shell)
         self._program_workspace.modified.connect(lambda: self._set_modified(True))
-        self._workspace_stack.addWidget(self._program_workspace)
+        self._workspace_shell.addTab(self._program_workspace, "程序编辑")
+        self._workspace_shell.setTabToolTip(1, "主程序 / FB、ST 与梯形图")
 
         # 连接
         self._btn_enter_immersive.clicked.connect(lambda: self._set_immersive_mode(not self._immersive_mode))
@@ -719,14 +824,14 @@ class MainWindow(
         self._btn_copy_d.clicked.connect(self._copy_d)
         self._btn_copy_cio.clicked.connect(self._copy_cio)
         self._btn_copy_all.clicked.connect(self._copy_combined)
-        self._btn_workspace_io.clicked.connect(lambda: self._set_workspace_mode("io"))
-        self._btn_workspace_program.clicked.connect(lambda: self._set_workspace_mode("program"))
+        self._workspace_shell.currentChanged.connect(self._on_workspace_shell_tab_changed)
         self._name_edit.textChanged.connect(self._on_meta_changed)
         self._plc_edit.textChanged.connect(self._on_meta_changed)
         if self._program_workspace is not None:
             self._program_workspace.set_project(self._project)
         self._sync_workspace_mode_buttons()
         self._set_workspace_mode("io")
+        self._sync_main_sidebar_visibility()
         self._sync_immersive_corner_button()
         self._sync_channel_action_buttons()
 
@@ -810,6 +915,99 @@ class MainWindow(
     # ══════════════════════════════════════════════════════════════════════════
     # 元数据
     # ══════════════════════════════════════════════════════════════════════════
+
+    def _on_workspace_shell_tab_changed(self, index: int) -> None:
+        want = "program" if index == 1 else "io"
+        if want == self._workspace_mode:
+            return
+        self._set_workspace_mode(want)
+
+    def _expand_sidebar_from_rail(self) -> None:
+        if self._immersive_mode or not self._project_panel_collapsed:
+            return
+        self._project_panel_collapsed = False
+        self._sync_main_sidebar_visibility()
+
+    def _toggle_sidebar_collapsed_from_grip(self) -> None:
+        if self._immersive_mode:
+            return
+        if (
+            not self._project_panel_collapsed
+            and self._root_splitter is not None
+            and self._sidebar is not None
+            and self._sidebar.isVisible()
+        ):
+            sizes = self._root_splitter.sizes()
+            if sizes and sizes[0] >= _SIDEBAR_WIDTH_MIN:
+                self._sidebar_saved_width = min(sizes[0], _SIDEBAR_WIDTH_DEFAULT)
+        self._project_panel_collapsed = not self._project_panel_collapsed
+        self._sync_main_sidebar_visibility()
+
+    def _on_root_splitter_moved(self, _pos: int, _index: int) -> None:
+        if self._root_splitter is None or self._sidebar is None or not self._sidebar.isVisible():
+            return
+        if self._immersive_mode:
+            return
+        sizes = self._root_splitter.sizes()
+        if len(sizes) < 1:
+            return
+        w0 = sizes[0]
+        if self._project_panel_collapsed:
+            if w0 >= _SIDEBAR_WIDTH_MIN:
+                self._sidebar_saved_width = min(w0, _SIDEBAR_WIDTH_DEFAULT)
+                self._project_panel_collapsed = False
+                self._sync_main_sidebar_visibility()
+            return
+        if w0 >= _SIDEBAR_WIDTH_MIN:
+            self._sidebar_saved_width = min(w0, _SIDEBAR_WIDTH_DEFAULT)
+
+    def _sync_main_sidebar_visibility(self) -> None:
+        if self._sidebar is None or self._root_splitter is None:
+            return
+        if self._immersive_mode:
+            self._sidebar.hide()
+        elif self._project_panel_collapsed:
+            self._sidebar.show()
+            if self._sidebar_body is not None:
+                self._sidebar_body.hide()
+            if self._sidebar_expand_rail is not None:
+                self._sidebar_expand_rail.show()
+            self._sidebar.setMinimumWidth(_SIDEBAR_COLLAPSED_STRIP)
+            self._sidebar.setMaximumWidth(_SIDEBAR_COLLAPSED_STRIP)
+            total = max(self._root_splitter.width(), 520)
+            self._root_splitter.blockSignals(True)
+            self._root_splitter.setSizes([_SIDEBAR_COLLAPSED_STRIP, total - _SIDEBAR_COLLAPSED_STRIP])
+            self._root_splitter.blockSignals(False)
+        else:
+            self._sidebar.show()
+            if self._sidebar_expand_rail is not None:
+                self._sidebar_expand_rail.hide()
+            if self._sidebar_body is not None:
+                self._sidebar_body.show()
+            self._sidebar.setMinimumWidth(_SIDEBAR_WIDTH_MIN)
+            self._sidebar.setMaximumWidth(_SIDEBAR_WIDTH_DEFAULT)
+            total = max(self._root_splitter.width(), 520)
+            w = max(_SIDEBAR_WIDTH_MIN, min(self._sidebar_saved_width, _SIDEBAR_WIDTH_DEFAULT))
+            self._root_splitter.blockSignals(True)
+            self._root_splitter.setSizes([w, total - w])
+            self._root_splitter.blockSignals(False)
+        self._refresh_main_splitter_grip_tooltip()
+
+    def _refresh_main_splitter_grip_tooltip(self) -> None:
+        sp = self._root_splitter
+        if sp is None or sp.main_grip is None:
+            return
+        grip = sp.main_grip
+        if self._immersive_mode:
+            grip.setToolTip("沉浸模式下左侧项目栏已隐藏；请先退出沉浸模式后再调整。")
+        elif self._project_panel_collapsed:
+            grip.setToolTip(
+                "双击分割条或左侧窄条展开「项目信息 / 最近项目」。也可向右拖动分割条拉宽后自动展开。"
+            )
+        else:
+            grip.setToolTip(
+                "拖动调整左侧区域宽度（最宽不超过默认宽度）。双击分割条收起侧栏（保留窄条，可再双击展开）。"
+            )
 
     def _on_meta_changed(self) -> None:
         self._project.name       = self._name_edit.text().strip() or "未命名"

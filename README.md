@@ -1,7 +1,7 @@
 # 欧姆龙 IO 分配助手
 
 **IO/符号表风格编辑**（列：**名称、数据类型、地址/值、注释**，可选 **机架位置、使用**），与 CX-Programmer 常见表格列对齐。**数据类型**下拉选项来自对欧姆龙官方《CX-Programmer Operation Manual》**(W446)** 的公开归纳；完整定义以官网手册为准：  
-https://files.omron.eu/downloads/latest/manual/en/w446_cx-programmer_operation_manual_en.pdf  
+[https://files.omron.eu/downloads/latest/manual/en/w446_cx-programmer_operation_manual_en.pdf](https://files.omron.eu/downloads/latest/manual/en/w446_cx-programmer_operation_manual_en.pdf)  
 类型列表见 `src/omron_io_planner/omron_symbol_types.py`（含对第三方对手册条目的整理链接）。
 
 ## 环境

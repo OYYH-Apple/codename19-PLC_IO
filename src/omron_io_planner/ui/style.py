@@ -279,6 +279,31 @@ QToolButton#recentProjectActionButton[danger="true"]:checked {{
 #mainSidebar {{
     background: transparent;
 }}
+#sidebarExpandRail {{
+    background-color: #DCE6F6;
+    border: none;
+    border-right: 1px solid #B8C8E0;
+}}
+#sidebarExpandRail:hover {{
+    background-color: #C8D8F0;
+}}
+/* 主分割条手柄由 SplitterGripHandle 自绘，此处不覆盖 */
+#workspaceMainTabWidget {{
+    background: transparent;
+}}
+#workspaceMainTabWidget::pane {{
+    border: 1px solid {C['border']};
+    border-radius: {C['radius']};
+    background-color: {C['bg_widget']};
+    top: -1px;
+}}
+QTabBar#workspaceMainTabBar {{
+    background: transparent;
+}}
+QTabBar#workspaceMainTabBar::tab {{
+    min-height: 22px;
+    padding: 7px 18px;
+}}
 #projectMetaGroup {{
     min-width: 240px;
 }}
